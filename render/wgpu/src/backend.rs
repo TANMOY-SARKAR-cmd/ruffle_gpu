@@ -1138,6 +1138,14 @@ pub async fn request_adapter_and_device(
             }
         })?;
 
+    let info = adapter.get_info();
+    tracing::info!(
+        "Selected GPU adapter: {} ({:?}) via {:?} backend",
+        info.name,
+        info.device_type,
+        info.backend,
+    );
+
     let (device, queue) = request_device(&adapter).await?;
     Ok((adapter, device, queue))
 }
@@ -1225,7 +1233,7 @@ impl ActiveFrame {
             command_encoder: descriptors
                 .device
                 .create_command_encoder(&Default::default()),
-            staging_belt: wgpu::util::StagingBelt::new(65536),
+            staging_belt: wgpu::util::StagingBelt::new(4 * 1024 * 1024),
             draws_since_flush: 0,
         }
     }
