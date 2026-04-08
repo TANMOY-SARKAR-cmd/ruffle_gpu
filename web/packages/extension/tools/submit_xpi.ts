@@ -19,6 +19,19 @@ function getJwtToken(apiKey: string, apiSecret: string) {
     return jwt.sign(payload, apiSecret, { algorithm: "HS256" });
 }
 
+function sanitizeExtensionId(extensionId: string) {
+    const trimmed = extensionId.trim();
+    const uuidInBracesPattern =
+        /^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\}$/;
+    const slugPattern = /^[A-Za-z0-9._@-]+$/;
+
+    if (!uuidInBracesPattern.test(trimmed) && !slugPattern.test(trimmed)) {
+        throw new Error("Invalid FIREFOX_EXTENSION_ID format.");
+    }
+
+    return encodeURIComponent(trimmed);
+}
+
 async function submit(
     apiKey: string,
     apiSecret: string,
@@ -160,12 +173,14 @@ As this is indeed a complicated build process, please let me know if there is an
     const version = createResponse.data.version;
     console.log("Created version: " + version);
 
+    const safeExtensionId = sanitizeExtensionId(extensionId);
+
     console.log("Uploading source code...");
     const sourceFormData = new FormData();
     sourceFormData.append("source", fs.createReadStream(sourcePath));
 
     const sourceUploadResponse = await client.patch(
-        `addon/${extensionId}/versions/${version}/`,
+        `addon/${safeExtensionId}/versions/${version}/`,
         sourceFormData,
         {
             headers: {
