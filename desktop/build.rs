@@ -29,10 +29,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!("cargo:rerun-if-env-changed=CFG_RELEASE_CHANNEL");
-    println!(
-        "cargo:rustc-env=CFG_RELEASE_CHANNEL={channel}",
-        channel = get_channel()
-    );
+    let channel = sanitize_for_cargo_output(&get_channel());
+    println!("cargo:rustc-env=CFG_RELEASE_CHANNEL={channel}");
 
     // Some SWFS have a large amount of recursion (particularly
     // around `goto`s). Increase the stack size on Windows

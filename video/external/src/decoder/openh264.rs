@@ -115,6 +115,7 @@ impl OpenH264Codec {
         );
 
         std::fs::create_dir_all(directory)?;
+        let directory = directory.canonicalize()?;
         let filepath = directory.join(filename);
 
         // If the binary doesn't exist in the expected location, download it.
@@ -218,7 +219,9 @@ impl H264Decoder {
                 "OpenH264 WelsCreateDecoder returned a null decoder pointer"
             );
 
-            let decoder_vtbl = (*decoder).as_ref().unwrap();
+            let decoder_vtbl = (*decoder)
+                .as_ref()
+                .expect("OpenH264 WelsCreateDecoder returned an invalid decoder vtable");
 
             let mut dec_param: openh264_sys::SDecodingParam = std::mem::zeroed();
             dec_param.sVideoProperty.eVideoBsType = openh264_sys::VIDEO_BITSTREAM_AVC;

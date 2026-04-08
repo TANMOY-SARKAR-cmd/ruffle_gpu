@@ -4,8 +4,13 @@ import url from "url";
 import archiver from "archiver";
 
 async function zip(source: string, destination: string) {
-    await fs.mkdir(path.dirname(destination), { recursive: true });
-    const output = (await fs.open(destination, "w")).createWriteStream();
+    const resolvedSource = path.resolve(source);
+    const resolvedDestination = path.resolve(destination);
+    if (!resolvedDestination.endsWith(".xpi") && !resolvedDestination.endsWith(".zip")) {
+        throw new Error("Destination must be an .xpi or .zip file.");
+    }
+    await fs.mkdir(path.dirname(resolvedDestination), { recursive: true });
+    const output = (await fs.open(resolvedDestination, "w")).createWriteStream();
     const archive = archiver("zip");
 
     output.on("close", () => {
@@ -28,7 +33,7 @@ async function zip(source: string, destination: string) {
 
     archive.pipe(output);
 
-    archive.directory(source, "");
+    archive.directory(resolvedSource, "");
 
     await archive.finalize();
 }

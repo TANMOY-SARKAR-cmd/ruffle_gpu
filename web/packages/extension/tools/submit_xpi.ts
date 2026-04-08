@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
 import { setTimeout } from "node:timers/promises";
 import axios from "axios";
@@ -46,6 +47,14 @@ async function submit(
 
     // For API docs, see: https://mozilla.github.io/addons-server/topics/api/addons.html
     const safeExtensionId = sanitizeExtensionId(extensionId);
+    const resolvedUnsignedPath = path.resolve(unsignedPath);
+    if (!resolvedUnsignedPath.endsWith(".xpi")) {
+        throw new Error("Unsigned add-on path must be an .xpi file.");
+    }
+    const resolvedSourcePath = path.resolve(sourcePath);
+    if (!resolvedSourcePath.endsWith(".zip")) {
+        throw new Error("Source path must be a .zip file.");
+    }
     const client = axios.create({
         baseURL: "https://addons.mozilla.org/api/v5/addons/",
     });
@@ -86,7 +95,7 @@ async function submit(
     console.log("Uploading unsigned add-on...");
     const addonFormData = new FormData();
     addonFormData.append("channel", "listed");
-    addonFormData.append("upload", fs.createReadStream(unsignedPath));
+    addonFormData.append("upload", fs.createReadStream(resolvedUnsignedPath));
 
     const addonUploadResponse = await client.postForm(
         "upload/",
@@ -176,7 +185,7 @@ As this is indeed a complicated build process, please let me know if there is an
 
     console.log("Uploading source code...");
     const sourceFormData = new FormData();
-    sourceFormData.append("source", fs.createReadStream(sourcePath));
+    sourceFormData.append("source", fs.createReadStream(resolvedSourcePath));
 
     const sourceUploadResponse = await client.patch(
         `addon/${safeExtensionId}/versions/${version}/`,
