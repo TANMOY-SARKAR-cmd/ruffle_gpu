@@ -33,6 +33,7 @@ pub struct CommandRenderer<'pass, 'frame: 'pass, 'global: 'frame> {
     current_pipeline: Option<*const wgpu::RenderPipeline>,
     current_bind_group_2: Option<*const wgpu::BindGroup>,
     current_transform_offset: Option<wgpu::DynamicOffset>,
+    current_stencil_reference: Option<u32>,
 }
 
 impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'global> {
@@ -56,6 +57,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             current_pipeline: None,
             current_bind_group_2: None,
             current_transform_offset: None,
+            current_stencil_reference: None,
         }
     }
 
@@ -89,19 +91,23 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.current_transform_offset = Some(transform_buffer);
     }
 
+    fn set_stencil_reference_cached(&mut self, stencil_reference: u32) {
+        if self.current_stencil_reference == Some(stencil_reference) {
+            return;
+        }
+        self.render_pass.set_stencil_reference(stencil_reference);
+        self.current_stencil_reference = Some(stencil_reference);
+    }
+
     pub fn execute(&mut self, command: &'frame DrawCommand) {
         if self.needs_stencil {
-            match self.mask_state {
-                MaskState::NoMask => {}
-                MaskState::DrawMaskStencil => {
-                    self.render_pass.set_stencil_reference(self.num_masks - 1);
-                }
-                MaskState::DrawMaskedContent => {
-                    self.render_pass.set_stencil_reference(self.num_masks);
-                }
-                MaskState::ClearMaskStencil => {
-                    self.render_pass.set_stencil_reference(self.num_masks);
-                }
+            let stencil_reference = match self.mask_state {
+                MaskState::NoMask => None,
+                MaskState::DrawMaskStencil => Some(self.num_masks - 1),
+                MaskState::DrawMaskedContent | MaskState::ClearMaskStencil => Some(self.num_masks),
+            };
+            if let Some(stencil_reference) = stencil_reference {
+                self.set_stencil_reference_cached(stencil_reference);
             }
         }
 
@@ -397,25 +403,25 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         );
         self.num_masks += 1;
         self.mask_state = MaskState::DrawMaskStencil;
-        self.render_pass.set_stencil_reference(self.num_masks - 1);
+        self.set_stencil_reference_cached(self.num_masks - 1);
     }
 
     pub fn activate_mask(&mut self) {
         debug_assert!(self.num_masks > 0 && self.mask_state == MaskState::DrawMaskStencil);
         self.mask_state = MaskState::DrawMaskedContent;
-        self.render_pass.set_stencil_reference(self.num_masks);
+        self.set_stencil_reference_cached(self.num_masks);
     }
 
     pub fn deactivate_mask(&mut self) {
         debug_assert!(self.num_masks > 0 && self.mask_state == MaskState::DrawMaskedContent);
         self.mask_state = MaskState::ClearMaskStencil;
-        self.render_pass.set_stencil_reference(self.num_masks);
+        self.set_stencil_reference_cached(self.num_masks);
     }
 
     pub fn pop_mask(&mut self) {
         debug_assert!(self.num_masks > 0 && self.mask_state == MaskState::ClearMaskStencil);
         self.num_masks -= 1;
-        self.render_pass.set_stencil_reference(self.num_masks);
+        self.set_stencil_reference_cached(self.num_masks);
         if self.num_masks == 0 {
             self.mask_state = MaskState::NoMask;
         } else {
@@ -537,6 +543,7 @@ struct WgpuCommandHandler<'a> {
     result: Vec<Chunk>,
     current: Vec<DrawCommand>,
     transforms: BufferBuilder,
+    last_transform: Option<(Transforms, wgpu::DynamicOffset)>,
     needs_stencil: bool,
     num_masks: i32,
 }
@@ -578,6 +585,7 @@ impl<'a> WgpuCommandHandler<'a> {
             result: vec![],
             current: vec![],
             transforms,
+            last_transform: None,
             needs_stencil: false,
             num_masks: 0,
         }
@@ -633,10 +641,18 @@ impl<'a> WgpuCommandHandler<'a> {
             mult_color: color_transform.mult_rgba_normalized(),
             add_color: color_transform.add_rgba_normalized(),
         };
+
+        if let Some((last_transform, transform_offset)) = self.last_transform
+            && bytemuck::bytes_of(&last_transform) == bytemuck::bytes_of(&transform)
+        {
+            self.current.push(command_builder(transform_offset));
+            return;
+        }
+
         if let Ok(transform_range) = self.transforms.add(&[transform]) {
-            self.current.push(command_builder(
-                transform_range.start as wgpu::DynamicOffset,
-            ));
+            let transform_offset = transform_range.start as wgpu::DynamicOffset;
+            self.last_transform = Some((transform, transform_offset));
+            self.current.push(command_builder(transform_offset));
         } else {
             self.result.push(Chunk::Draw(
                 mem::take(&mut self.current),
@@ -646,15 +662,16 @@ impl<'a> WgpuCommandHandler<'a> {
                     BufferBuilder::new_for_uniform(&self.descriptors.limits),
                 ),
             ));
+            self.last_transform = None;
             self.transforms
                 .set_buffer_limit(self.dynamic_transforms.buffer.size());
             let transform_range = self
                 .transforms
                 .add(&[transform])
                 .expect("Buffer must be able to fit a new thing, it was just emptied");
-            self.current.push(command_builder(
-                transform_range.start as wgpu::DynamicOffset,
-            ));
+            let transform_offset = transform_range.start as wgpu::DynamicOffset;
+            self.last_transform = Some((transform, transform_offset));
+            self.current.push(command_builder(transform_offset));
         }
     }
 }
@@ -744,6 +761,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                             BufferBuilder::new_for_uniform(&self.descriptors.limits),
                         ),
                     ));
+                    self.last_transform = None;
                 }
                 self.transforms
                     .set_buffer_limit(self.dynamic_transforms.buffer.size());
