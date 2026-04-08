@@ -87,9 +87,15 @@ describe("URL Rewrite Rules", () => {
 
         await browser.waitUntil(
             async () => {
-                return (await browser.getUrl()).startsWith(
-                    "https://www.example.com",
-                );
+                try {
+                    const currentUrl = new URL(await browser.getUrl());
+                    return (
+                        currentUrl.protocol === "https:" &&
+                        currentUrl.hostname === "www.example.com"
+                    );
+                } catch {
+                    return false;
+                }
             },
             {
                 timeoutMsg: "Expected window URL to change",
