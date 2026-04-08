@@ -48,7 +48,13 @@ async function submit(
     // For API docs, see: https://mozilla.github.io/addons-server/topics/api/addons.html
     const safeExtensionId = sanitizeExtensionId(extensionId);
     const resolvedUnsignedPath = path.resolve(unsignedPath);
+    if (!resolvedUnsignedPath.endsWith(".xpi")) {
+        throw new Error("Unsigned add-on path must be an .xpi file.");
+    }
     const resolvedSourcePath = path.resolve(sourcePath);
+    if (!resolvedSourcePath.endsWith(".zip")) {
+        throw new Error("Source path must be a .zip file.");
+    }
     const client = axios.create({
         baseURL: "https://addons.mozilla.org/api/v5/addons/",
     });
