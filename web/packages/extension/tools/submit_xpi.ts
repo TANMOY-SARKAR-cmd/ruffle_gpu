@@ -45,13 +45,14 @@ async function submit(
     // But since we're already poking directly at the API, might as well do those too...
 
     // For API docs, see: https://mozilla.github.io/addons-server/topics/api/addons.html
+    const safeExtensionId = sanitizeExtensionId(extensionId);
     const client = axios.create({
         baseURL: "https://addons.mozilla.org/api/v5/addons/",
     });
 
     console.log("Checking the status of the last submitted add-on version...");
     const versionsResponse = await client.get(
-        `addon/${extensionId}/versions/`,
+        `addon/${safeExtensionId}/versions/`,
         {
             headers: {
                 Authorization: `JWT ${getJwtToken(apiKey, apiSecret)}`,
@@ -131,7 +132,7 @@ async function submit(
 
     console.log("Creating a new version of the add-on...");
     const createResponse = await client.post(
-        `addon/${extensionId}/versions/`,
+        `addon/${safeExtensionId}/versions/`,
         {
             upload: uploadUuid,
             compatibility: {
@@ -172,8 +173,6 @@ As this is indeed a complicated build process, please let me know if there is an
 
     const version = createResponse.data.version;
     console.log("Created version: " + version);
-
-    const safeExtensionId = sanitizeExtensionId(extensionId);
 
     console.log("Uploading source code...");
     const sourceFormData = new FormData();
