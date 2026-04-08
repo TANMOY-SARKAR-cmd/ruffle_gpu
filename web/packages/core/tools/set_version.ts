@@ -62,7 +62,7 @@ if (process.env["ENABLE_VERSION_SEAL"] === "true") {
             firefox_extension_id: firefoxExtensionId,
         };
 
-        fs.writeFileSync(sealFile, JSON.stringify(versionSeal));
+        fs.writeFileSync(sealFile, JSON.stringify(versionSeal), { flag: "wx" });
     }
 }
 
