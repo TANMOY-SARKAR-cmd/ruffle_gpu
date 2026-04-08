@@ -61,6 +61,10 @@ fn get_channel() -> Cow<'static, str> {
     }
 }
 
+fn sanitize_for_cargo_output(input: &str) -> String {
+    input.replace('\n', "").replace('\r', "")
+}
+
 fn set_windows_resource() -> Result<(), Box<dyn Error>> {
     let mut res = winresource::WindowsResource::new();
 
@@ -70,8 +74,9 @@ fn set_windows_resource() -> Result<(), Box<dyn Error>> {
     // Set the application icon
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let icon_path = format!("{manifest_dir}/assets/favicon.ico");
+    let icon_path_for_output = sanitize_for_cargo_output(&icon_path);
 
-    println!("cargo:rerun-if-changed={icon_path}");
+    println!("cargo:rerun-if-changed={icon_path_for_output}");
 
     res.set_icon(&icon_path);
 
