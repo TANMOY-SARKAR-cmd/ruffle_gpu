@@ -529,7 +529,7 @@ impl Player {
 
         // Clamp very large host deltas (window drag, debugger pause, tab/background wakeups)
         // so we don't accumulate a huge burst that causes visible stutter.
-        const MAX_CATCHUP_MS: f64 = 250.0;
+        const MAX_CATCHUP_MS: f64 = 100.0;
         let dt_ms = dt.as_millis();
         let clamped_dt_ms = if dt_ms.is_finite() {
             dt_ms.clamp(0.0, MAX_CATCHUP_MS)
