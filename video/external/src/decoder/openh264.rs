@@ -213,6 +213,10 @@ impl H264Decoder {
         let mut decoder: *mut ISVCDecoder = ptr::null_mut();
         unsafe {
             openh264.WelsCreateDecoder(&mut decoder);
+            assert!(
+                !decoder.is_null(),
+                "OpenH264 WelsCreateDecoder returned a null decoder pointer"
+            );
 
             let decoder_vtbl = (*decoder).as_ref().unwrap();
 
