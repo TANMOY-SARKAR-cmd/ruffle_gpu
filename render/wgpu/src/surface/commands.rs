@@ -34,6 +34,12 @@ pub struct CommandRenderer<'pass, 'frame: 'pass, 'global: 'frame> {
     current_bind_group_2: Option<*const wgpu::BindGroup>,
     current_transform_offset: Option<wgpu::DynamicOffset>,
     current_stencil_reference: Option<u32>,
+    /// Cache key for the currently-bound vertex buffer. Stored as a raw pointer
+    /// used for identity comparison only; it is never dereferenced.
+    current_vertex_buffer: Option<*const wgpu::Buffer>,
+    /// Cache key for the currently-bound index buffer. Stored as a raw pointer
+    /// used for identity comparison only; it is never dereferenced.
+    current_index_buffer: Option<*const wgpu::Buffer>,
 }
 
 impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'global> {
@@ -58,6 +64,8 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             current_bind_group_2: None,
             current_transform_offset: None,
             current_stencil_reference: None,
+            current_vertex_buffer: None,
+            current_index_buffer: None,
         }
     }
 
@@ -97,6 +105,39 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         }
         self.render_pass.set_stencil_reference(stencil_reference);
         self.current_stencil_reference = Some(stencil_reference);
+    }
+
+    /// Set the vertex buffer, skipping the GPU command if it is already bound.
+    fn set_vertex_buffer_cached(
+        &mut self,
+        key: *const wgpu::Buffer,
+        slice: wgpu::BufferSlice<'pass>,
+    ) {
+        if self.current_vertex_buffer != Some(key) {
+            self.render_pass.set_vertex_buffer(0, slice);
+            self.current_vertex_buffer = Some(key);
+        }
+    }
+
+    /// Set the index buffer, skipping the GPU command if it is already bound.
+    fn set_index_buffer_cached(
+        &mut self,
+        key: *const wgpu::Buffer,
+        slice: wgpu::BufferSlice<'pass>,
+    ) {
+        if self.current_index_buffer != Some(key) {
+            self.render_pass
+                .set_index_buffer(slice, wgpu::IndexFormat::Uint32);
+            self.current_index_buffer = Some(key);
+        }
+    }
+
+    /// Returns the raw-pointer cache key and full-range `BufferSlice` for
+    /// the given buffer in a single step. The key is used only for pointer
+    /// equality comparisons and is never dereferenced.
+    #[inline]
+    fn buf_key_slice(buf: &'pass wgpu::Buffer) -> (*const wgpu::Buffer, wgpu::BufferSlice<'pass>) {
+        (buf as *const wgpu::Buffer, buf.slice(..))
     }
 
     pub fn execute(&mut self, command: &'frame DrawCommand) {
@@ -228,6 +269,10 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             .set_index_buffer(indices, wgpu::IndexFormat::Uint32);
 
         self.render_pass.draw_indexed(0..num_indices, 0, 0..1);
+        // Mesh draws use partial buffer slices with varying ranges; invalidate
+        // the cached state so the next draw correctly re-binds its buffers.
+        self.current_vertex_buffer = None;
+        self.current_index_buffer = None;
     }
 
     pub fn render_bitmap(
@@ -256,11 +301,11 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.prep_bitmap(&bind.bind_group, blend_mode, render_stage3d);
         self.set_transform_bind_group(transform_buffer);
 
-        self.draw(
-            self.descriptors.quad.vertices_pos.slice(..),
-            self.descriptors.quad.indices.slice(..),
-            6,
-        );
+        let (vb_key, vb_slice) = Self::buf_key_slice(&self.descriptors.quad.vertices_pos);
+        let (ib_key, ib_slice) = Self::buf_key_slice(&self.descriptors.quad.indices);
+        self.set_vertex_buffer_cached(vb_key, vb_slice);
+        self.set_index_buffer_cached(ib_key, ib_slice);
+        self.render_pass.draw_indexed(0..6, 0, 0..1);
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
         }
@@ -278,11 +323,11 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.prep_bitmap(bind_group, blend_mode, false);
         self.set_transform_bind_group(transform_buffer);
 
-        self.draw(
-            self.descriptors.quad.vertices_pos.slice(..),
-            self.descriptors.quad.indices.slice(..),
-            6,
-        );
+        let (vb_key, vb_slice) = Self::buf_key_slice(&self.descriptors.quad.vertices_pos);
+        let (ib_key, ib_slice) = Self::buf_key_slice(&self.descriptors.quad.indices);
+        self.set_vertex_buffer_cached(vb_key, vb_slice);
+        self.set_index_buffer_cached(ib_key, ib_slice);
+        self.render_pass.draw_indexed(0..6, 0, 0..1);
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
         }
@@ -348,11 +393,11 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.prep_alpha_mask(bind_group);
         self.set_transform_bind_group(transform_buffer);
 
-        self.draw(
-            self.descriptors.quad.vertices_pos.slice(..),
-            self.descriptors.quad.indices.slice(..),
-            6,
-        );
+        let (vb_key, vb_slice) = Self::buf_key_slice(&self.descriptors.quad.vertices_pos);
+        let (ib_key, ib_slice) = Self::buf_key_slice(&self.descriptors.quad.indices);
+        self.set_vertex_buffer_cached(vb_key, vb_slice);
+        self.set_index_buffer_cached(ib_key, ib_slice);
+        self.render_pass.draw_indexed(0..6, 0, 0..1);
 
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
@@ -366,11 +411,11 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.prep_color();
         self.set_transform_bind_group(transform_buffer);
 
-        self.draw(
-            self.descriptors.quad.vertices_pos_color.slice(..),
-            self.descriptors.quad.indices.slice(..),
-            6,
-        );
+        let (vb_key, vb_slice) = Self::buf_key_slice(&self.descriptors.quad.vertices_pos_color);
+        let (ib_key, ib_slice) = Self::buf_key_slice(&self.descriptors.quad.indices);
+        self.set_vertex_buffer_cached(vb_key, vb_slice);
+        self.set_index_buffer_cached(ib_key, ib_slice);
+        self.render_pass.draw_indexed(0..6, 0, 0..1);
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
         }
@@ -383,15 +428,17 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.prep_lines();
         self.set_transform_bind_group(transform_buffer);
 
-        self.draw(
-            self.descriptors.quad.vertices_pos_color.slice(..),
-            if RECT {
-                self.descriptors.quad.indices_line_rect.slice(..)
-            } else {
-                self.descriptors.quad.indices_line.slice(..)
-            },
-            if RECT { 5 } else { 2 },
-        );
+        let (vb_key, vb_slice) = Self::buf_key_slice(&self.descriptors.quad.vertices_pos_color);
+        let (ib_key, ib_slice, num_indices) = if RECT {
+            let (k, s) = Self::buf_key_slice(&self.descriptors.quad.indices_line_rect);
+            (k, s, 5)
+        } else {
+            let (k, s) = Self::buf_key_slice(&self.descriptors.quad.indices_line);
+            (k, s, 2)
+        };
+        self.set_vertex_buffer_cached(vb_key, vb_slice);
+        self.set_index_buffer_cached(ib_key, ib_slice);
+        self.render_pass.draw_indexed(0..num_indices, 0, 0..1);
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
         }
