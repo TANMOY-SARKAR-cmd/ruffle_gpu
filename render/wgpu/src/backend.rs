@@ -86,8 +86,8 @@ const WARMUP_FRAMES: u64 = 8;
 /// Lightweight adaptive performance tracker.
 ///
 /// Measures wall-clock time between consecutive `submit_frame` calls, maintains
-/// a smoothed (EMA) frame time, and derives per-type batch limits that are used
-/// in place of the hard-coded `MAX_BATCH_RECTS` / `MAX_BATCH_BITMAPS` constants.
+/// a smoothed (EMA) frame time, and derives per-type batch limits (`rect_batch_limit`
+/// and `bitmap_batch_limit`) bounded by `MIN_BATCH_LIMIT` and `MAX_BATCH_LIMIT`.
 ///
 /// # Safety guarantees
 /// * The batch limits only change *how many* instances are packed into a single
@@ -723,7 +723,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     ) {
         // ── Frame-time measurement ────────────────────────────────────────────
         // Record the wall-clock start so we can measure total frame cost and
-        // update the adaptive batch-limit after submission completes.  This is
+        // update the adaptive batch limits after submission completes.  This is
         // purely a performance hint; it does not affect game logic or AS3.
         let frame_start = self.frame_metrics.begin_frame();
         let rect_batch_limit = self.frame_metrics.rect_batch_limit();

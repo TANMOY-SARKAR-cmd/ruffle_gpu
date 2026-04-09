@@ -758,15 +758,16 @@ pub enum LayerRef<'a> {
 /// batch commands into a single GPU-backed draw call, then materialise the
 /// GPU `wgpu::Buffer` for each merged batch exactly once.
 ///
-/// **Safe merges (bounded by `batch_limit`):**
+/// **Safe merges:**
 /// * Consecutive `PendingRectBatch` commands — same pipeline, no per-batch
 ///   GPU state; their instance data can be concatenated while preserving order.
+///   Merges stop once the combined instance count would exceed `rect_batch_limit`.
 /// * Consecutive `PendingBitmapBatch` commands that share the same
 ///   `(bitmap, smoothing, blend_mode)` key — same texture and pipeline.
+///   Merges stop once the combined instance count would exceed `bitmap_batch_limit`.
 ///
-/// Both kinds of merge stop as soon as adding the next pending batch would
-/// push the combined `num_instances` above `batch_limit`, ensuring the
-/// adaptive flush threshold is respected end-to-end.
+/// Both limits come from the per-type adaptive values in `FrameMetrics`,
+/// ensuring the flush threshold is respected end-to-end.
 ///
 /// GPU buffers are created **once per final merged run**, eliminating the
 /// quadratic reallocation of the old pairwise approach.
