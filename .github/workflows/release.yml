@@ -54,8 +54,17 @@ jobs:
           fi
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
+          echo "Latest tag: $LATEST"
+          echo "New tag: $NEW"
+          if git rev-parse "$NEW" >/dev/null 2>&1; then
+            echo "Tag $NEW already exists, skipping"
+            exit 0
+          fi
           git tag "$NEW"
-          git push origin "$NEW"
+          git push origin "$NEW" || {
+            echo "Push failed (likely race condition), skipping"
+            exit 0
+          }
 
   build:
     name: Build (${{ matrix.os }})
