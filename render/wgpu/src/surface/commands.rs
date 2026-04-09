@@ -23,6 +23,25 @@ use wgpu::util::DeviceExt;
 
 use super::target::PoolOrArcTexture;
 
+/// Maximum number of rectangles accumulated in a single `DrawRectBatch`
+/// before it is automatically flushed.  Each rect occupies 4 vertices
+/// (≈ 96 bytes) and 6 indices (24 bytes), so 16 384 rects ≈ 1.5 MiB.
+const MAX_BATCH_RECTS: usize = 16_384;
+
+/// Index offsets for the two triangles that make up one quad.
+/// Applied as `base + QUAD_INDICES[i]` when building index buffers.
+const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+/// Normalise a [`swf::Color`] to premultiplied linear RGBA in `[0.0, 1.0]`.
+#[inline]
+fn color_to_premult_rgba(c: Color) -> [f32; 4] {
+    let r = f32::from(c.r) / 255.0;
+    let g = f32::from(c.g) / 255.0;
+    let b = f32::from(c.b) / 255.0;
+    let a = f32::from(c.a) / 255.0;
+    [r * a, g * a, b * a, a]
+}
+
 pub struct CommandRenderer<'pass, 'frame: 'pass, 'global: 'frame> {
     pipelines: &'frame Pipelines,
     descriptors: &'global Descriptors,
@@ -1000,12 +1019,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         // Pre-transform the quad vertices to world space and pre-compute the
         // premultiplied RGBA color on the CPU so that multiple consecutive
         // draw_rect calls can be merged into a single GPU draw call.
-        let r = f32::from(color.r) / 255.0;
-        let g = f32::from(color.g) / 255.0;
-        let b = f32::from(color.b) / 255.0;
-        let a = f32::from(color.a) / 255.0;
-        // Premultiply alpha (matches what the old color.wgsl shader produced).
-        let premult = [r * a, g * a, b * a, a];
+        let premult = color_to_premult_rgba(color);
 
         // World-space positions of the four quad corners.
         // Quad in object space: [0,0], [1,0], [1,1], [0,1]
@@ -1036,13 +1050,11 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             position: [mc + tx, md + ty],
             color: premult,
         });
-        // Two clockwise triangles per quad: (0,1,2) and (0,2,3).
+        // Two clockwise triangles per quad, using the shared index template.
         self.rect_batch_indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            .extend(QUAD_INDICES.iter().map(|&i| base + i));
 
-        // Flush when the batch reaches a size that keeps GPU buffer uploads
-        // reasonable.  16 384 rects ≈ 1 MiB of vertex data.
-        const MAX_BATCH_RECTS: usize = 16_384;
+        // Flush when the batch reaches the size limit.
         if self.rect_batch_vertices.len() >= MAX_BATCH_RECTS * 4 {
             self.flush_rect_batch();
         }
