@@ -14,6 +14,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  auto_tag:
+    name: Auto Tag Version
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.ref_type != 'tag'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch --tags
+
+      - name: Create and push new version tag
+        run: |
+          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -z "$LATEST" ]; then
+            NEW="v0.1.0"
+          else
+            VERSION="${LATEST#v}"
+            MAJOR=$(echo "$VERSION" | cut -d. -f1)
+            MINOR=$(echo "$VERSION" | cut -d. -f2)
+            PATCH=$(echo "$VERSION" | cut -d. -f3)
+            NEW="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag "$NEW"
+          git push origin "$NEW"
+
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
