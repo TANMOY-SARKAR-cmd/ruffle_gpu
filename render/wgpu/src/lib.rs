@@ -106,6 +106,23 @@ struct PosColorVertex {
     color: [f32; 4],
 }
 
+/// Per-instance data for the instanced solid-colour rectangle pipeline.
+///
+/// Encodes the 2D affine transform that maps the unit quad [0,1]×[0,1] to
+/// world space, plus a premultiplied RGBA colour.  Layout (40 bytes):
+///   bytes  0–7  : `x_axis`      = [a, b]  — x-axis contribution (column 0 of 2×2 matrix)
+///   bytes  8–15 : `y_axis`      = [c, d]  — y-axis contribution (column 1 of 2×2 matrix)
+///   bytes 16–23 : `translation` = [tx, ty] — world-space translation
+///   bytes 24–39 : `color`       = premultiplied RGBA
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct RectInstance {
+    pub x_axis:      [f32; 2],
+    pub y_axis:      [f32; 2],
+    pub translation: [f32; 2],
+    pub color:       [f32; 4],
+}
+
 impl From<TessVertex> for PosColorVertex {
     fn from(vertex: TessVertex) -> Self {
         Self {

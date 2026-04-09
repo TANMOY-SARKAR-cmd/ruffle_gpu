@@ -1,7 +1,7 @@
 use crate::blend::{ComplexBlend, TrivialBlend};
 use crate::layouts::BindLayouts;
 use crate::shaders::Shaders;
-use crate::{MaskState, PosColorVertex, PosVertex};
+use crate::{MaskState, PosColorVertex, PosVertex, RectInstance};
 use enum_map::{Enum, EnumMap, enum_map};
 use wgpu::{BlendState, PrimitiveTopology, vertex_attr_array};
 
@@ -23,6 +23,29 @@ pub const VERTEX_BUFFERS_DESCRIPTION_COLOR: [wgpu::VertexBufferLayout; 1] =
             1 => Float32x4,
         ],
     }];
+
+/// Two-slot vertex buffer layout for the instanced solid-colour rect pipeline.
+///
+/// Slot 0 (`Vertex` step): unit-quad positions from the shared `Quad` buffer.
+/// Slot 1 (`Instance` step): per-rect `RectInstance` data — affine transform
+/// (ab, cd, txty) and premultiplied colour.
+pub const VERTEX_BUFFERS_DESCRIPTION_RECT_INSTANCED: [wgpu::VertexBufferLayout; 2] = [
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<PosVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &vertex_attr_array![0 => Float32x2],
+    },
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<RectInstance>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &vertex_attr_array![
+            1 => Float32x2,  // ab
+            2 => Float32x2,  // cd
+            3 => Float32x2,  // txty
+            4 => Float32x4,  // color
+        ],
+    },
+];
 
 #[derive(Debug)]
 pub struct ShapePipeline {
@@ -47,11 +70,11 @@ pub struct Pipelines {
     pub gradients: ShapePipeline,
     pub complex_blends: EnumMap<ComplexBlend, ShapePipeline>,
     pub alpha_mask: ShapePipeline,
-    /// Pipeline for batched pre-transformed colored rectangles.
-    /// Uses only the globals bind group (group 0); no per-object transform
-    /// uniform is required because world-space positions and premultiplied
-    /// colors are baked into the vertex buffer.
-    pub batched_color: ShapePipeline,
+    /// Pipeline for instanced solid-colour rectangles.
+    /// Uses only the globals bind group (group 0).  Per-rect transform and
+    /// colour are supplied via a per-instance vertex buffer (slot 1), and the
+    /// shared unit-quad geometry is supplied in slot 0.
+    pub rect_instanced: ShapePipeline,
 }
 
 impl ShapePipeline {
@@ -255,17 +278,18 @@ impl Pipelines {
             PrimitiveTopology::TriangleList,
         );
 
-        // Batched color pipeline: world-space positions + premultiplied colors
-        // baked into the vertex buffer. Only group(0) globals are needed.
-        let batched_color_bindings = vec![&bind_layouts.globals];
-        let batched_color_pipeline = create_shape_pipeline(
-            "Batched Color",
+        // Instanced colour-rect pipeline: unit-quad geometry in slot 0,
+        // per-instance transform + colour in slot 1.  Only group(0) globals
+        // are needed; no per-object transform uniform (group 1) is required.
+        let rect_instanced_bindings = vec![&bind_layouts.globals];
+        let rect_instanced_pipeline = create_shape_pipeline(
+            "Rect Instanced",
             device,
             format,
-            &shaders.color_pretransformed_shader,
+            &shaders.rect_instanced_shader,
             msaa_sample_count,
-            &VERTEX_BUFFERS_DESCRIPTION_COLOR,
-            &batched_color_bindings,
+            &VERTEX_BUFFERS_DESCRIPTION_RECT_INSTANCED,
+            &rect_instanced_bindings,
             BlendState::PREMULTIPLIED_ALPHA_BLENDING,
             &[],
             PrimitiveTopology::TriangleList,
@@ -280,7 +304,7 @@ impl Pipelines {
             gradients: gradient_pipeline,
             complex_blends: complex_blend_pipelines,
             alpha_mask: alpha_mask_pipeline,
-            batched_color: batched_color_pipeline,
+            rect_instanced: rect_instanced_pipeline,
         }
     }
 }

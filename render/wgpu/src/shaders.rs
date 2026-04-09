@@ -5,10 +5,11 @@ use ruffle_render::shader_source::SHADER_FILTER_COMMON;
 #[derive(Debug)]
 pub struct Shaders {
     pub color_shader: wgpu::ShaderModule,
-    /// Shader for batched pre-transformed solid color fills (rect batching).
-    /// Uses only group(0) globals; world-space positions and premultiplied
-    /// colors are baked into the vertex buffer on the CPU.
-    pub color_pretransformed_shader: wgpu::ShaderModule,
+    /// Shader for instanced solid-colour rectangle rendering.
+    /// Uses only group(0) globals; each instance carries its own 2D affine
+    /// transform and premultiplied colour in a per-instance vertex buffer,
+    /// so no per-object transform uniform (group 1) is needed.
+    pub rect_instanced_shader: wgpu::ShaderModule,
     /// This has a pipeline-overridable `bool` constant, `late_saturate`,
     /// with a default of `false`. It switches to performing saturation
     /// after re-multiplying the alpha, rather than before. This is used
@@ -31,10 +32,10 @@ pub struct Shaders {
 impl Shaders {
     pub fn new(device: &wgpu::Device) -> Self {
         let color_shader = make_shader(device, "color.wgsl", include_str!("../shaders/color.wgsl"));
-        let color_pretransformed_shader = make_shader(
+        let rect_instanced_shader = make_shader(
             device,
-            "color_pretransformed.wgsl",
-            include_str!("../shaders/color_pretransformed.wgsl"),
+            "rect_instanced.wgsl",
+            include_str!("../shaders/rect_instanced.wgsl"),
         );
         let bitmap_shader = make_shader(
             device,
@@ -97,7 +98,7 @@ impl Shaders {
 
         Self {
             color_shader,
-            color_pretransformed_shader,
+            rect_instanced_shader,
             bitmap_shader,
             gradient_shader,
             copy_srgb_shader,
