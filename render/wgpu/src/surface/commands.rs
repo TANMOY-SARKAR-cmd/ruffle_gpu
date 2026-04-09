@@ -203,7 +203,6 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             DrawCommand::DrawBitmapInstanced {
                 bitmap,
                 instances,
-                instance_bytes: _,
                 num_instances,
                 smoothing,
                 blend_mode,
@@ -227,9 +226,11 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             }
             DrawCommand::DrawRectInstanced {
                 instances,
-                instance_bytes: _,
                 num_instances,
             } => self.draw_rect_instanced(instances, *num_instances),
+            DrawCommand::PendingRectBatch(_) | DrawCommand::PendingBitmapBatch { .. } => {
+                unreachable!("pending batch commands must be consumed by optimize_draw_commands before rendering")
+            }
             DrawCommand::PushMask => self.push_mask(),
             DrawCommand::ActivateMask => self.activate_mask(),
             DrawCommand::DeactivateMask => self.deactivate_mask(),
@@ -698,13 +699,11 @@ pub enum DrawCommand {
     /// affine transform and a color transform.  All instances share the same
     /// texture (identified by `bitmap`), sampler (`smoothing`), and `blend_mode`.
     ///
-    /// `instance_bytes` is a CPU-side copy of the raw `BitmapInstance` data
-    /// stored in `instances`.  It is used by the command optimizer to merge
-    /// consecutive compatible batches without GPU readbacks.
+    /// Produced by `optimize_draw_commands` after merging `PendingBitmapBatch`
+    /// commands.  Never appears as a pre-optimization intermediate.
     DrawBitmapInstanced {
         bitmap: BitmapHandle,
         instances: wgpu::Buffer,
-        instance_bytes: Box<[u8]>,
         num_instances: u32,
         smoothing: bool,
         blend_mode: TrivialBlend,
@@ -715,13 +714,26 @@ pub enum DrawCommand {
     /// RGBA colour.  The GPU applies the transform to the shared unit-quad
     /// geometry, so no index buffer needs to be supplied per batch.
     ///
-    /// `instance_bytes` is a CPU-side copy of the raw `RectInstance` data
-    /// stored in `instances`.  It is used by the command optimizer to merge
-    /// consecutive batches without GPU readbacks.
+    /// Produced by `optimize_draw_commands` after merging `PendingRectBatch`
+    /// commands.  Never appears as a pre-optimization intermediate.
     DrawRectInstanced {
         instances: wgpu::Buffer,
-        instance_bytes: Box<[u8]>,
         num_instances: u32,
+    },
+    /// Accumulated rect instances that have not yet been GPU-materialized.
+    /// Emitted by `flush_rect_batch`; consumed (and transformed into
+    /// `DrawRectInstanced`) by `optimize_draw_commands`.  Never reaches the
+    /// renderer.
+    PendingRectBatch(Vec<RectInstance>),
+    /// Accumulated bitmap instances that have not yet been GPU-materialized.
+    /// Emitted by `flush_bitmap_batch`; consumed (and transformed into
+    /// `DrawBitmapInstanced`) by `optimize_draw_commands`.  Never reaches the
+    /// renderer.
+    PendingBitmapBatch {
+        bitmap: BitmapHandle,
+        bitmaps: Vec<BitmapInstance>,
+        smoothing: bool,
+        blend_mode: TrivialBlend,
     },
     /// Single pre-transformed colored rectangle (legacy path, kept as a safe
     /// fallback; not currently generated but matched in `execute`).
@@ -742,117 +754,150 @@ pub enum LayerRef<'a> {
     Parent(&'a CommandTarget),
 }
 
-/// Post-process a `Vec<DrawCommand>`, merging consecutive commands that are
-/// compatible with each other.
+/// Post-process a `Vec<DrawCommand>`, merging consecutive compatible pending
+/// batch commands into a single GPU-backed draw call, then materialise the
+/// GPU `wgpu::Buffer` for each merged batch exactly once.
 ///
-/// **Safe merges:**
-/// * Two consecutive `DrawRectInstanced` — both use the same pipeline and carry
-///   no per-batch GPU state, so their instance data can always be concatenated
-///   while preserving draw order.
-/// * Two consecutive `DrawBitmapInstanced` that share the same `(bitmap,
-///   smoothing, blend_mode)` key — they bind the same texture and pipeline, so
-///   their instance data can be concatenated without changing the final image.
+/// **Safe merges (bounded by `batch_limit`):**
+/// * Consecutive `PendingRectBatch` commands — same pipeline, no per-batch
+///   GPU state; their instance data can be concatenated while preserving order.
+/// * Consecutive `PendingBitmapBatch` commands that share the same
+///   `(bitmap, smoothing, blend_mode)` key — same texture and pipeline.
 ///
-/// All other consecutive pairs (different types, different bitmap keys, mask
-/// commands, etc.) are left untouched to preserve render correctness.
+/// Both kinds of merge stop as soon as adding the next pending batch would
+/// push the combined `num_instances` above `batch_limit`, ensuring the
+/// adaptive flush threshold is respected end-to-end.
 ///
-/// The function creates a new GPU `wgpu::Buffer` for each merged pair and drops
-/// the two original buffers.
+/// GPU buffers are created **once per final merged run**, eliminating the
+/// quadratic reallocation of the old pairwise approach.
 fn optimize_draw_commands(
     commands: Vec<DrawCommand>,
     device: &wgpu::Device,
+    batch_limit: usize,
 ) -> Vec<DrawCommand> {
+    // ── helpers ───────────────────────────────────────────────────────────
+    fn emit_rect_run(
+        run: &mut Vec<RectInstance>,
+        out: &mut Vec<DrawCommand>,
+        device: &wgpu::Device,
+    ) {
+        if run.is_empty() {
+            return;
+        }
+        let num_instances = run.len() as u32;
+        let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: create_debug_label!("Rect instanced buffer").as_deref(),
+            contents: bytemuck::cast_slice(run),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        run.clear();
+        out.push(DrawCommand::DrawRectInstanced {
+            instances,
+            num_instances,
+        });
+    }
+
+    fn emit_bitmap_run(
+        run: &mut Option<(BitmapHandle, bool, TrivialBlend, Vec<BitmapInstance>)>,
+        out: &mut Vec<DrawCommand>,
+        device: &wgpu::Device,
+    ) {
+        let Some((bitmap, smoothing, blend_mode, bitmaps)) = run.take() else {
+            return;
+        };
+        if bitmaps.is_empty() {
+            return;
+        }
+        let num_instances = bitmaps.len() as u32;
+        let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: create_debug_label!("Bitmap instanced buffer").as_deref(),
+            contents: bytemuck::cast_slice(&bitmaps),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        out.push(DrawCommand::DrawBitmapInstanced {
+            bitmap,
+            instances,
+            num_instances,
+            smoothing,
+            blend_mode,
+        });
+    }
+    // ── main pass ─────────────────────────────────────────────────────────
     let mut out: Vec<DrawCommand> = Vec::with_capacity(commands.len());
+    let mut rect_run: Vec<RectInstance> = Vec::new();
+    let mut bitmap_run: Option<(BitmapHandle, bool, TrivialBlend, Vec<BitmapInstance>)> = None;
 
-    'next: for cmd in commands {
-        // Try to merge `cmd` into the last command already in `out`.
-        if let Some(last) = out.last_mut() {
-            match last {
-                // ── Merge two consecutive rect batches ───────────────────────
-                DrawCommand::DrawRectInstanced {
-                    instances: prev_buf,
-                    instance_bytes: prev_bytes,
-                    num_instances: prev_n,
-                } => {
-                    if let DrawCommand::DrawRectInstanced {
-                        instance_bytes: curr_bytes,
-                        num_instances: curr_n,
-                        ..
-                    } = &cmd
-                    {
-                        let mut merged =
-                            Vec::with_capacity(prev_bytes.len() + curr_bytes.len());
-                        merged.extend_from_slice(prev_bytes);
-                        merged.extend_from_slice(curr_bytes);
-                        let new_buf =
-                            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: create_debug_label!(
-                                    "Merged rect instanced buffer"
-                                )
-                                .as_deref(),
-                                contents: &merged,
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
-                        *prev_buf = new_buf;
-                        *prev_n += curr_n;
-                        *prev_bytes = merged.into_boxed_slice();
-                        continue 'next;
-                    }
+    for cmd in commands {
+        match cmd {
+            // ── Rect batches ──────────────────────────────────────────────
+            DrawCommand::PendingRectBatch(mut new_rects) => {
+                // Different type: flush any in-progress bitmap run.
+                emit_bitmap_run(&mut bitmap_run, &mut out, device);
+
+                // If adding new_rects would exceed the limit, flush the
+                // current rect run first.
+                if !rect_run.is_empty()
+                    && rect_run.len() + new_rects.len() > batch_limit
+                {
+                    emit_rect_run(&mut rect_run, &mut out, device);
                 }
+                rect_run.append(&mut new_rects);
+                // Emit immediately if we hit the cap exactly.
+                if rect_run.len() >= batch_limit {
+                    emit_rect_run(&mut rect_run, &mut out, device);
+                }
+            }
 
-                // ── Merge two consecutive bitmap batches with the same key ───
-                DrawCommand::DrawBitmapInstanced {
-                    bitmap: prev_bitmap,
-                    instances: prev_buf,
-                    instance_bytes: prev_bytes,
-                    num_instances: prev_n,
-                    smoothing: prev_sm,
-                    blend_mode: prev_blend,
-                } => {
-                    if let DrawCommand::DrawBitmapInstanced {
-                        bitmap: curr_bitmap,
-                        instance_bytes: curr_bytes,
-                        num_instances: curr_n,
-                        smoothing: curr_sm,
-                        blend_mode: curr_blend,
-                        ..
-                    } = &cmd
-                    {
-                        // Must share the same texture, sampler, and pipeline.
-                        if *prev_bitmap == *curr_bitmap
-                            && *prev_sm == *curr_sm
-                            && mem::discriminant(prev_blend)
-                                == mem::discriminant(curr_blend)
-                        {
-                            let mut merged = Vec::with_capacity(
-                                prev_bytes.len() + curr_bytes.len(),
-                            );
-                            merged.extend_from_slice(prev_bytes);
-                            merged.extend_from_slice(curr_bytes);
-                            let new_buf = device.create_buffer_init(
-                                &wgpu::util::BufferInitDescriptor {
-                                    label: create_debug_label!(
-                                        "Merged bitmap instanced buffer"
-                                    )
-                                    .as_deref(),
-                                    contents: &merged,
-                                    usage: wgpu::BufferUsages::VERTEX,
-                                },
-                            );
-                            *prev_buf = new_buf;
-                            *prev_n += curr_n;
-                            *prev_bytes = merged.into_boxed_slice();
-                            continue 'next;
+            // ── Bitmap batches ────────────────────────────────────────────
+            DrawCommand::PendingBitmapBatch {
+                bitmap,
+                mut bitmaps,
+                smoothing,
+                blend_mode,
+            } => {
+                // Different type: flush any in-progress rect run.
+                emit_rect_run(&mut rect_run, &mut out, device);
+
+                let same_key = bitmap_run.as_ref().map_or(false, |(pb, ps, pbl, _)| {
+                    *pb == bitmap
+                        && *ps == smoothing
+                        && mem::discriminant(pbl) == mem::discriminant(&blend_mode)
+                });
+
+                if !same_key {
+                    // New key: commit the previous bitmap run (if any) and
+                    // start a fresh one.
+                    emit_bitmap_run(&mut bitmap_run, &mut out, device);
+                    bitmap_run = Some((bitmap, smoothing, blend_mode, bitmaps));
+                } else {
+                    // Same key: try to extend the current run.
+                    let (_, _, _, pending) = bitmap_run.as_mut().unwrap();
+                    if !pending.is_empty() && pending.len() + bitmaps.len() > batch_limit {
+                        // Would exceed the limit: emit the current run and
+                        // start a new one with this batch.
+                        emit_bitmap_run(&mut bitmap_run, &mut out, device);
+                        bitmap_run = Some((bitmap, smoothing, blend_mode, bitmaps));
+                    } else {
+                        pending.append(&mut bitmaps);
+                        if pending.len() >= batch_limit {
+                            emit_bitmap_run(&mut bitmap_run, &mut out, device);
                         }
                     }
                 }
+            }
 
-                _ => {}
+            // ── Everything else ───────────────────────────────────────────
+            other => {
+                emit_rect_run(&mut rect_run, &mut out, device);
+                emit_bitmap_run(&mut bitmap_run, &mut out, device);
+                out.push(other);
             }
         }
-        // No merge was possible; just append.
-        out.push(cmd);
     }
+
+    // Flush any trailing runs.
+    emit_rect_run(&mut rect_run, &mut out, device);
+    emit_bitmap_run(&mut bitmap_run, &mut out, device);
 
     out
 }
@@ -986,8 +1031,10 @@ impl<'a> WgpuCommandHandler<'a> {
         transforms
     }
 
-    /// Flush the accumulated instanced rect batch (if any) as a single
-    /// `DrawRectInstanced` command in `self.current`.  Clears the accumulator.
+    /// Flush the accumulated instanced rect batch (if any) as a
+    /// `PendingRectBatch` command in `self.current`.  The GPU buffer is
+    /// **not** created here; `optimize_draw_commands` materialises it later,
+    /// once after any merges, so the data is only copied once.
     ///
     /// Call this before emitting any command that is not a `draw_rect` so that
     /// draw order between batched rects and other draw calls is preserved.
@@ -995,31 +1042,14 @@ impl<'a> WgpuCommandHandler<'a> {
         if self.rect_instances.is_empty() {
             return;
         }
-
-        let num_instances = self.rect_instances.len() as u32;
-        let raw: &[u8] = bytemuck::cast_slice(&self.rect_instances);
-        // Keep a CPU copy so the optimizer can merge consecutive batches.
-        let instance_bytes: Box<[u8]> = raw.to_vec().into_boxed_slice();
-        let instances = self
-            .descriptors
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: create_debug_label!("Rect instanced buffer").as_deref(),
-                contents: raw,
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-        self.rect_instances.clear();
-
-        self.current.push(DrawCommand::DrawRectInstanced {
-            instances,
-            instance_bytes,
-            num_instances,
-        });
+        let rects = mem::take(&mut self.rect_instances);
+        self.current.push(DrawCommand::PendingRectBatch(rects));
     }
 
-    /// Flush the accumulated instanced bitmap batch (if any) as a single
-    /// `DrawBitmapInstanced` command in `self.current`.  Clears the accumulator.
+    /// Flush the accumulated instanced bitmap batch (if any) as a
+    /// `PendingBitmapBatch` command in `self.current`.  The GPU buffer is
+    /// **not** created here; `optimize_draw_commands` materialises it later,
+    /// once after any merges, so the data is only copied once.
     ///
     /// Call this before emitting any command that is not a `render_bitmap` so
     /// that draw order between batched bitmaps and other draw calls is preserved.
@@ -1030,24 +1060,10 @@ impl<'a> WgpuCommandHandler<'a> {
         if self.bitmap_instances.is_empty() {
             return;
         }
-        let num_instances = self.bitmap_instances.len() as u32;
-        let raw: &[u8] = bytemuck::cast_slice(&self.bitmap_instances);
-        // Keep a CPU copy so the optimizer can merge consecutive batches.
-        let instance_bytes: Box<[u8]> = raw.to_vec().into_boxed_slice();
-        let instances = self
-            .descriptors
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: create_debug_label!("Bitmap instanced buffer").as_deref(),
-                contents: raw,
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        self.bitmap_instances.clear();
-        self.current.push(DrawCommand::DrawBitmapInstanced {
+        let bitmaps = mem::take(&mut self.bitmap_instances);
+        self.current.push(DrawCommand::PendingBitmapBatch {
             bitmap,
-            instances,
-            instance_bytes,
-            num_instances,
+            bitmaps,
             smoothing,
             blend_mode,
         });
@@ -1073,6 +1089,7 @@ impl<'a> WgpuCommandHandler<'a> {
             let cmds = optimize_draw_commands(
                 mem::take(&mut self.current),
                 &self.descriptors.device,
+                self.batch_limit,
             );
             self.result.push(Chunk::Draw(cmds, needs_stencil, transforms));
         }
@@ -1092,6 +1109,7 @@ impl<'a> WgpuCommandHandler<'a> {
         let cmds = optimize_draw_commands(
             mem::take(&mut self.current),
             &self.descriptors.device,
+            self.batch_limit,
         );
         self.result
             .push(Chunk::Draw(cmds, self.needs_stencil, transforms));
