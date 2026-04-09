@@ -17,6 +17,8 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -27,7 +29,7 @@ jobs:
           - os: windows-latest
             artifact_name: ruffle_desktop.exe
             asset_name: ruffle-windows-x86_64.exe
-          - os: macos-latest
+          - os: macos-13
             artifact_name: ruffle_desktop
             asset_name: ruffle-macos-x86_64
 
