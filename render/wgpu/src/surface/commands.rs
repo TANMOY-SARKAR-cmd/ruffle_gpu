@@ -498,20 +498,22 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         }
         self.prep_rect_instanced();
         // Slot 0: shared unit-quad positions (four corners [0,1]×[0,1]).
-        self.render_pass
-            .set_vertex_buffer(0, self.descriptors.quad.vertices_pos.slice(..));
-        // Slot 1: per-rect instance data (varies per batch).
+        // Use the cached helper so that consecutive instanced draw calls skip
+        // the redundant rebind when the same quad buffer is already bound.
+        let (vb0_key, vb0_slice) = Self::buf_key_slice(&self.descriptors.quad.vertices_pos);
+        let (ib_key, ib_slice) = Self::buf_key_slice(&self.descriptors.quad.indices);
+        self.set_vertex_buffer_cached(vb0_key, vb0_slice);
+        // Slot 1: per-rect instance data (varies per batch; always rebound).
         self.render_pass.set_vertex_buffer(1, instances.slice(..));
         // Shared quad index buffer [0, 1, 2, 0, 2, 3] — two triangles.
-        self.render_pass.set_index_buffer(
-            self.descriptors.quad.indices.slice(..),
-            wgpu::IndexFormat::Uint32,
-        );
+        self.set_index_buffer_cached(ib_key, ib_slice);
         self.render_pass.draw_indexed(0..6, 0, 0..num_instances);
-        // Invalidate the slot-0 and index-buffer caches so that the next
-        // non-instanced draw correctly re-binds its own buffers.
-        self.current_vertex_buffer = None;
-        self.current_index_buffer = None;
+        // Keep `current_vertex_buffer` pointing at `vertices_pos` and
+        // `current_index_buffer` pointing at `indices`.  Non-instanced draws
+        // that follow use the same cached helpers, so they will rebind slot 0
+        // only when their buffer differs (e.g. `vertices_pos_color` for rects).
+        // Shape draws (`draw`) always rebind unconditionally, so they are
+        // unaffected by this cached state.
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
         }
@@ -567,21 +569,23 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.set_group1_bitmap_bind_group_cached(&bind.bind_group);
 
         // Slot 0: shared unit-quad positions (four corners [0,1]×[0,1]).
-        self.render_pass
-            .set_vertex_buffer(0, self.descriptors.quad.vertices_pos.slice(..));
-        // Slot 1: per-bitmap instance data (varies per batch).
+        // Use the cached helper so that consecutive instanced draw calls skip
+        // the redundant rebind when the same quad buffer is already bound.
+        let (vb0_key, vb0_slice) = Self::buf_key_slice(&self.descriptors.quad.vertices_pos);
+        let (ib_key, ib_slice) = Self::buf_key_slice(&self.descriptors.quad.indices);
+        self.set_vertex_buffer_cached(vb0_key, vb0_slice);
+        // Slot 1: per-bitmap instance data (varies per batch; always rebound).
         self.render_pass.set_vertex_buffer(1, instances.slice(..));
         // Shared quad index buffer [0, 1, 2, 0, 2, 3] — two triangles.
-        self.render_pass.set_index_buffer(
-            self.descriptors.quad.indices.slice(..),
-            wgpu::IndexFormat::Uint32,
-        );
+        self.set_index_buffer_cached(ib_key, ib_slice);
         self.render_pass.draw_indexed(0..6, 0, 0..num_instances);
 
-        // Invalidate the slot-0 and index-buffer caches so that the next
-        // non-instanced draw correctly re-binds its own buffers.
-        self.current_vertex_buffer = None;
-        self.current_index_buffer = None;
+        // Keep `current_vertex_buffer` pointing at `vertices_pos` and
+        // `current_index_buffer` pointing at `indices`.  Non-instanced draws
+        // that follow use the same cached helpers, so they will rebind slot 0
+        // only when their buffer differs (e.g. `vertices_pos_color` for rects).
+        // Shape draws (`draw`) always rebind unconditionally, so they are
+        // unaffected by this cached state.
 
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
@@ -807,9 +811,9 @@ fn optimize_draw_commands(
         let Some((bitmap, smoothing, blend_mode, bitmaps)) = run.take() else {
             return;
         };
-        if bitmaps.is_empty() {
-            return;
-        }
+        // `flush_bitmap_batch` never creates an empty batch, so `bitmaps` is
+        // always non-empty here.
+        debug_assert!(!bitmaps.is_empty());
         let num_instances = bitmaps.len() as u32;
         let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: create_debug_label!("Bitmap instanced buffer").as_deref(),
@@ -863,7 +867,7 @@ fn optimize_draw_commands(
                 let same_key = bitmap_run.as_ref().map_or(false, |(pb, ps, pbl, _)| {
                     *pb == bitmap
                         && *ps == smoothing
-                        && mem::discriminant(pbl) == mem::discriminant(&blend_mode)
+                        && *pbl == blend_mode
                 });
 
                 if !same_key {
@@ -1319,7 +1323,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         if let Some((ref key_bitmap, key_smoothing, key_blend)) = self.bitmap_batch_key {
             if *key_bitmap != bitmap
                 || key_smoothing != smoothing
-                || mem::discriminant(&key_blend) != mem::discriminant(&blend_mode)
+                || key_blend != blend_mode
             {
                 self.flush_bitmap_batch();
             }
