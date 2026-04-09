@@ -139,14 +139,21 @@ impl FrameMetrics {
                     // standard lerp(a, b, t) = a*(1-t) + b*t formulation so
                     // that each adjustment closes LERP_STEP of the remaining
                     // gap, giving smooth geometric convergence.
+                    // `floor` ensures we always move strictly toward MIN and
+                    // that the limit can reach MIN_BATCH_LIMIT exactly when the
+                    // gap becomes < 1.0.
                     let new = current * (1.0 - LERP_STEP) + MIN_BATCH_LIMIT as f64 * LERP_STEP;
-                    Some((new as usize).max(MIN_BATCH_LIMIT))
+                    Some((new.floor() as usize).max(MIN_BATCH_LIMIT))
                 } else if self.smoothed_ms < RELIEF_THRESHOLD_MS
                     && self.batch_limit < MAX_BATCH_LIMIT
                 {
                     // Headroom available: gradually recover toward the maximum.
+                    // `ceil` ensures we always move strictly toward MAX and that
+                    // the limit can reach MAX_BATCH_LIMIT exactly when the
+                    // remaining gap shrinks below 1.0, avoiding an infinite
+                    // near-ceiling stall.
                     let new = current * (1.0 - LERP_STEP) + MAX_BATCH_LIMIT as f64 * LERP_STEP;
-                    Some((new as usize).min(MAX_BATCH_LIMIT))
+                    Some((new.ceil() as usize).min(MAX_BATCH_LIMIT))
                 } else {
                     None
                 };
