@@ -498,20 +498,22 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         }
         self.prep_rect_instanced();
         // Slot 0: shared unit-quad positions (four corners [0,1]×[0,1]).
-        self.render_pass
-            .set_vertex_buffer(0, self.descriptors.quad.vertices_pos.slice(..));
-        // Slot 1: per-rect instance data (varies per batch).
+        // Use the cached helper so that consecutive instanced draw calls skip
+        // the redundant rebind when the same quad buffer is already bound.
+        let (vb0_key, vb0_slice) = Self::buf_key_slice(&self.descriptors.quad.vertices_pos);
+        let (ib_key, ib_slice) = Self::buf_key_slice(&self.descriptors.quad.indices);
+        self.set_vertex_buffer_cached(vb0_key, vb0_slice);
+        // Slot 1: per-rect instance data (varies per batch; always rebound).
         self.render_pass.set_vertex_buffer(1, instances.slice(..));
         // Shared quad index buffer [0, 1, 2, 0, 2, 3] — two triangles.
-        self.render_pass.set_index_buffer(
-            self.descriptors.quad.indices.slice(..),
-            wgpu::IndexFormat::Uint32,
-        );
+        self.set_index_buffer_cached(ib_key, ib_slice);
         self.render_pass.draw_indexed(0..6, 0, 0..num_instances);
-        // Invalidate the slot-0 and index-buffer caches so that the next
-        // non-instanced draw correctly re-binds its own buffers.
-        self.current_vertex_buffer = None;
-        self.current_index_buffer = None;
+        // Keep `current_vertex_buffer` pointing at `vertices_pos` and
+        // `current_index_buffer` pointing at `indices`.  Non-instanced draws
+        // that follow use the same cached helpers, so they will rebind slot 0
+        // only when their buffer differs (e.g. `vertices_pos_color` for rects).
+        // Shape draws (`draw`) always rebind unconditionally, so they are
+        // unaffected by this cached state.
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
         }
@@ -567,21 +569,23 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.set_group1_bitmap_bind_group_cached(&bind.bind_group);
 
         // Slot 0: shared unit-quad positions (four corners [0,1]×[0,1]).
-        self.render_pass
-            .set_vertex_buffer(0, self.descriptors.quad.vertices_pos.slice(..));
-        // Slot 1: per-bitmap instance data (varies per batch).
+        // Use the cached helper so that consecutive instanced draw calls skip
+        // the redundant rebind when the same quad buffer is already bound.
+        let (vb0_key, vb0_slice) = Self::buf_key_slice(&self.descriptors.quad.vertices_pos);
+        let (ib_key, ib_slice) = Self::buf_key_slice(&self.descriptors.quad.indices);
+        self.set_vertex_buffer_cached(vb0_key, vb0_slice);
+        // Slot 1: per-bitmap instance data (varies per batch; always rebound).
         self.render_pass.set_vertex_buffer(1, instances.slice(..));
         // Shared quad index buffer [0, 1, 2, 0, 2, 3] — two triangles.
-        self.render_pass.set_index_buffer(
-            self.descriptors.quad.indices.slice(..),
-            wgpu::IndexFormat::Uint32,
-        );
+        self.set_index_buffer_cached(ib_key, ib_slice);
         self.render_pass.draw_indexed(0..6, 0, 0..num_instances);
 
-        // Invalidate the slot-0 and index-buffer caches so that the next
-        // non-instanced draw correctly re-binds its own buffers.
-        self.current_vertex_buffer = None;
-        self.current_index_buffer = None;
+        // Keep `current_vertex_buffer` pointing at `vertices_pos` and
+        // `current_index_buffer` pointing at `indices`.  Non-instanced draws
+        // that follow use the same cached helpers, so they will rebind slot 0
+        // only when their buffer differs (e.g. `vertices_pos_color` for rects).
+        // Shape draws (`draw`) always rebind unconditionally, so they are
+        // unaffected by this cached state.
 
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
@@ -758,22 +762,24 @@ pub enum LayerRef<'a> {
 /// batch commands into a single GPU-backed draw call, then materialise the
 /// GPU `wgpu::Buffer` for each merged batch exactly once.
 ///
-/// **Safe merges (bounded by `batch_limit`):**
+/// **Safe merges:**
 /// * Consecutive `PendingRectBatch` commands — same pipeline, no per-batch
 ///   GPU state; their instance data can be concatenated while preserving order.
+///   Merges stop once the combined instance count would exceed `rect_batch_limit`.
 /// * Consecutive `PendingBitmapBatch` commands that share the same
 ///   `(bitmap, smoothing, blend_mode)` key — same texture and pipeline.
+///   Merges stop once the combined instance count would exceed `bitmap_batch_limit`.
 ///
-/// Both kinds of merge stop as soon as adding the next pending batch would
-/// push the combined `num_instances` above `batch_limit`, ensuring the
-/// adaptive flush threshold is respected end-to-end.
+/// Both limits come from the per-type adaptive values in `FrameMetrics`,
+/// ensuring the flush threshold is respected end-to-end.
 ///
 /// GPU buffers are created **once per final merged run**, eliminating the
 /// quadratic reallocation of the old pairwise approach.
 fn optimize_draw_commands(
     commands: Vec<DrawCommand>,
     device: &wgpu::Device,
-    batch_limit: usize,
+    rect_batch_limit: usize,
+    bitmap_batch_limit: usize,
 ) -> Vec<DrawCommand> {
     // ── helpers ───────────────────────────────────────────────────────────
     fn emit_rect_run(
@@ -805,9 +811,9 @@ fn optimize_draw_commands(
         let Some((bitmap, smoothing, blend_mode, bitmaps)) = run.take() else {
             return;
         };
-        if bitmaps.is_empty() {
-            return;
-        }
+        // `flush_bitmap_batch` never creates an empty batch, so `bitmaps` is
+        // always non-empty here.
+        debug_assert!(!bitmaps.is_empty());
         let num_instances = bitmaps.len() as u32;
         let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: create_debug_label!("Bitmap instanced buffer").as_deref(),
@@ -837,13 +843,13 @@ fn optimize_draw_commands(
                 // If adding new_rects would exceed the limit, flush the
                 // current rect run first.
                 if !rect_run.is_empty()
-                    && rect_run.len() + new_rects.len() > batch_limit
+                    && rect_run.len() + new_rects.len() > rect_batch_limit
                 {
                     emit_rect_run(&mut rect_run, &mut out, device);
                 }
                 rect_run.append(&mut new_rects);
                 // Emit immediately if we hit the cap exactly.
-                if rect_run.len() >= batch_limit {
+                if rect_run.len() >= rect_batch_limit {
                     emit_rect_run(&mut rect_run, &mut out, device);
                 }
             }
@@ -861,7 +867,7 @@ fn optimize_draw_commands(
                 let same_key = bitmap_run.as_ref().map_or(false, |(pb, ps, pbl, _)| {
                     *pb == bitmap
                         && *ps == smoothing
-                        && mem::discriminant(pbl) == mem::discriminant(&blend_mode)
+                        && *pbl == blend_mode
                 });
 
                 if !same_key {
@@ -872,14 +878,14 @@ fn optimize_draw_commands(
                 } else {
                     // Same key: try to extend the current run.
                     let (_, _, _, pending) = bitmap_run.as_mut().unwrap();
-                    if !pending.is_empty() && pending.len() + bitmaps.len() > batch_limit {
+                    if !pending.is_empty() && pending.len() + bitmaps.len() > bitmap_batch_limit {
                         // Would exceed the limit: emit the current run and
                         // start a new one with this batch.
                         emit_bitmap_run(&mut bitmap_run, &mut out, device);
                         bitmap_run = Some((bitmap, smoothing, blend_mode, bitmaps));
                     } else {
                         pending.append(&mut bitmaps);
-                        if pending.len() >= batch_limit {
+                        if pending.len() >= bitmap_batch_limit {
                             emit_bitmap_run(&mut bitmap_run, &mut out, device);
                         }
                     }
@@ -917,7 +923,8 @@ pub fn chunk_blends<'a>(
     height: u32,
     nearest_layer: LayerRef,
     texture_pool: &mut TexturePool,
-    batch_limit: usize,
+    rect_batch_limit: usize,
+    bitmap_batch_limit: usize,
 ) -> Vec<Chunk> {
     WgpuCommandHandler::new(
         descriptors,
@@ -930,7 +937,8 @@ pub fn chunk_blends<'a>(
         height,
         nearest_layer,
         texture_pool,
-        batch_limit,
+        rect_batch_limit,
+        bitmap_batch_limit,
     )
     .chunk_blends(commands)
 }
@@ -955,11 +963,17 @@ struct WgpuCommandHandler<'a> {
     needs_stencil: bool,
     num_masks: i32,
 
-    /// Adaptive batch size limit.  Controls the maximum number of instances
-    /// packed into a single `DrawRectInstanced` or `DrawBitmapInstanced` call
-    /// before an automatic flush.  Derived from `FrameMetrics`; does **not**
-    /// affect which commands are issued or the final rendered image.
-    batch_limit: usize,
+    /// Adaptive batch size limit for `DrawRectInstanced` calls.
+    /// Controls the maximum number of rect instances packed into a single
+    /// draw call before an automatic flush.  Derived from `FrameMetrics`;
+    /// does **not** affect which commands are issued or the final rendered image.
+    rect_batch_limit: usize,
+
+    /// Adaptive batch size limit for `DrawBitmapInstanced` calls.
+    /// Controls the maximum number of bitmap instances packed into a single
+    /// draw call before an automatic flush.  Derived from `FrameMetrics`;
+    /// does **not** affect which commands are issued or the final rendered image.
+    bitmap_batch_limit: usize,
 
     /// Accumulated per-rect instance data for the in-progress instanced batch.
     rect_instances: Vec<RectInstance>,
@@ -984,7 +998,8 @@ impl<'a> WgpuCommandHandler<'a> {
         height: u32,
         nearest_layer: LayerRef<'a>,
         texture_pool: &'a mut TexturePool,
-        batch_limit: usize,
+        rect_batch_limit: usize,
+        bitmap_batch_limit: usize,
     ) -> Self {
         let transforms = Self::new_transforms(descriptors, dynamic_transforms);
 
@@ -1013,7 +1028,8 @@ impl<'a> WgpuCommandHandler<'a> {
             needs_stencil: false,
             num_masks: 0,
 
-            batch_limit,
+            rect_batch_limit,
+            bitmap_batch_limit,
 
             rect_instances: Vec::new(),
 
@@ -1089,7 +1105,8 @@ impl<'a> WgpuCommandHandler<'a> {
             let cmds = optimize_draw_commands(
                 mem::take(&mut self.current),
                 &self.descriptors.device,
-                self.batch_limit,
+                self.rect_batch_limit,
+                self.bitmap_batch_limit,
             );
             self.result.push(Chunk::Draw(cmds, needs_stencil, transforms));
         }
@@ -1109,7 +1126,8 @@ impl<'a> WgpuCommandHandler<'a> {
         let cmds = optimize_draw_commands(
             mem::take(&mut self.current),
             &self.descriptors.device,
-            self.batch_limit,
+            self.rect_batch_limit,
+            self.bitmap_batch_limit,
         );
         self.result
             .push(Chunk::Draw(cmds, self.needs_stencil, transforms));
@@ -1198,7 +1216,8 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.draw_encoder,
             target_layer,
             self.texture_pool,
-            self.batch_limit,
+            self.rect_batch_limit,
+            self.bitmap_batch_limit,
         );
         target.ensure_cleared(self.draw_encoder);
 
@@ -1304,7 +1323,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         if let Some((ref key_bitmap, key_smoothing, key_blend)) = self.bitmap_batch_key {
             if *key_bitmap != bitmap
                 || key_smoothing != smoothing
-                || mem::discriminant(&key_blend) != mem::discriminant(&blend_mode)
+                || key_blend != blend_mode
             {
                 self.flush_bitmap_batch();
             }
@@ -1321,7 +1340,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         });
 
         // Flush when the batch reaches the size limit.
-        if self.bitmap_instances.len() >= self.batch_limit {
+        if self.bitmap_instances.len() >= self.bitmap_batch_limit {
             self.flush_bitmap_batch();
         }
     }
@@ -1377,7 +1396,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         });
 
         // Flush when the batch reaches the size limit.
-        if self.rect_instances.len() >= self.batch_limit {
+        if self.rect_instances.len() >= self.rect_batch_limit {
             self.flush_rect_batch();
         }
     }
@@ -1469,7 +1488,8 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.draw_encoder,
             LayerRef::None,
             self.texture_pool,
-            self.batch_limit,
+            self.rect_batch_limit,
+            self.bitmap_batch_limit,
         );
         maskee.ensure_cleared(self.draw_encoder);
         let matrix = Matrix::scale(maskee.width() as f32, maskee.height() as f32);
@@ -1485,7 +1505,8 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.draw_encoder,
             LayerRef::None,
             self.texture_pool,
-            self.batch_limit,
+            self.rect_batch_limit,
+            self.bitmap_batch_limit,
         );
         mask.ensure_cleared(self.draw_encoder);
         let mask = mask.take_color_texture();

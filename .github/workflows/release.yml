@@ -1,0 +1,153 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag (e.g. v0.2.0)"
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: ruffle_desktop
+            asset_name: ruffle-linux-x86_64
+          - os: windows-latest
+            artifact_name: ruffle_desktop.exe
+            asset_name: ruffle-windows-x86_64.exe
+          - os: macos-latest
+            artifact_name: ruffle_desktop
+            asset_name: ruffle-macos-x86_64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create tag (manual trigger)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.tag != ''
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git fetch --tags
+          if git rev-parse "${{ github.event.inputs.tag }}" >/dev/null 2>&1; then
+            echo "Tag already exists, skipping"
+          else
+            git tag "${{ github.event.inputs.tag }}"
+            git push https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }} "${{ github.event.inputs.tag }}"
+          fi
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libudev-dev \
+            libdbus-1-dev \
+            libfontconfig1-dev \
+            pkg-config
+
+      - name: Set up Java (required by core/build_playerglobal)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable as of 2026-03-27
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Build release binary
+        run: cargo build --release --locked -p ruffle_desktop
+
+      - name: Rename binary for upload
+        shell: bash
+        run: |
+          cp target/release/${{ matrix.artifact_name }} ${{ matrix.asset_name }}
+
+      - name: Make binary executable
+        if: runner.os != 'Windows'
+        run: chmod +x ${{ matrix.asset_name }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create GitHub Release and upload binaries
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## Ruffle Desktop
+
+            Pre-built binaries for this release are attached below.
+
+            ### Usage
+
+            **Linux**
+            ```bash
+            chmod +x ruffle-linux-x86_64
+            ./ruffle-linux-x86_64 path/to/movie.swf
+            ```
+
+            **macOS**
+            ```bash
+            chmod +x ruffle-macos-x86_64
+            ./ruffle-macos-x86_64 path/to/movie.swf
+            ```
+
+            **Windows**
+            ```
+            ruffle-windows-x86_64.exe path\to\movie.swf
+            ```
+
+            Run with `--help` for a full list of options.
+          files: |
+            artifacts/**/*

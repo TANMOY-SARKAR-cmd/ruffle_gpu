@@ -66,7 +66,7 @@ impl BlendType {
     }
 }
 
-#[derive(Enum, Debug, Copy, Clone)]
+#[derive(Enum, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum TrivialBlend {
     Normal,
     Add,
