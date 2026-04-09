@@ -128,7 +128,7 @@ impl OpenH264Codec {
         // preventing any path traversal through the (otherwise hardcoded) filename.
         if Path::new(filename).components().count() != 1 {
             return Err(
-                "Internal error: library filename must not contain path components".into(),
+                "internal error: library filename must not contain path components".into(),
             );
         }
 
@@ -148,7 +148,7 @@ impl OpenH264Codec {
                 }
             }
             let (canonical_base, remaining) = found_ancestor
-                .ok_or("Cache directory path has no accessible ancestor on the filesystem")?;
+                .ok_or("cache directory path has no accessible ancestor on the filesystem")?;
             canonical_base.join(remaining)
         };
 
