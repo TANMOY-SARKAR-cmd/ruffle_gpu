@@ -597,6 +597,11 @@ fn parse_backend_override(raw: &str) -> Option<wgpu::Backends> {
 }
 
 fn prioritized_backends(backends: wgpu::Backends) -> Vec<wgpu::Backends> {
+    if let Ok(val) = std::env::var("WGPU_BACKEND")
+        && val.to_lowercase() == "vulkan"
+    {
+        return vec![wgpu::Backends::VULKAN];
+    }
 
     let mut ordered = Vec::new();
     if backends.contains(wgpu::Backends::VULKAN) {
