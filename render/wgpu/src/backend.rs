@@ -61,10 +61,27 @@ const RELIEF_THRESHOLD_MS: f64 = 20.0; // ≈50 FPS
 /// threshold boundary.
 const COOLDOWN_FRAMES: u64 = 10;
 
-/// Fraction of the distance from the current limit to the target limit that
-/// is closed on each allowed adjustment.  0.20 means "close 20% of the gap",
-/// giving a smooth geometric convergence instead of a hard jump.
-const LERP_STEP: f64 = 0.20;
+/// Fraction of the gap closed per adjustment when the batch limit is being
+/// *reduced* (frame time above PRESSURE_THRESHOLD).  A slightly higher value
+/// (0.25) makes the controller react faster to genuine GPU overload.
+const LERP_STEP_DOWN: f64 = 0.25;
+
+/// Fraction of the gap closed per adjustment when the batch limit is being
+/// *raised* (frame time below RELIEF_THRESHOLD).  A lower value (0.10) makes
+/// recovery deliberately slow: a rapid ramp-up would risk oscillation by
+/// returning to the high limit before the GPU has stabilised, triggering
+/// another pressure reduction immediately after.  Asymmetric rates (faster
+/// down, slower up) are a standard technique in adaptive-rate controllers to
+/// prevent sawtooth behaviour.
+const LERP_STEP_UP: f64 = 0.10;
+
+/// Number of frames the EMA must be running before any batch-limit adjustment
+/// is permitted.  The first few frames often have artificially long durations
+/// (pipeline compilation, asset loading, first-frame overheads) that would
+/// otherwise cause a premature reduction.  Eight frames at 60 FPS ≈ 133 ms —
+/// enough for the EMA (α = 0.1) to incorporate several real samples and for
+/// transient start-up noise to subside.
+const WARMUP_FRAMES: u64 = 8;
 
 /// Lightweight adaptive performance tracker.
 ///
@@ -122,37 +139,47 @@ impl FrameMetrics {
             self.smoothed_ms =
                 EMA_ALPHA * elapsed_ms + (1.0 - EMA_ALPHA) * self.smoothed_ms;
 
+            // Warm-up gate: skip all adjustments until the EMA has been running
+            // for WARMUP_FRAMES.  The first few frames often carry start-up
+            // overheads (pipeline compilation, asset loading) that inflate
+            // frame time and would otherwise trigger a premature reduction.
+            let warmed_up = self.frame_index >= WARMUP_FRAMES;
+
             // Cooldown gate: only attempt an adjustment once per COOLDOWN_FRAMES
             // frames.  This prevents the controller from toggling every frame
             // when smoothed_ms hovers near a threshold, eliminating oscillation.
             // `last_adjust_frame = None` means no adjustment has ever been made,
-            // so the first pressure signal is acted on immediately.
+            // so the first post-warmup pressure signal is acted on immediately.
             let cooldown_elapsed = self.last_adjust_frame.map_or(true, |last| {
                 self.frame_index.saturating_sub(last) >= COOLDOWN_FRAMES
             });
-            if cooldown_elapsed {
+            if warmed_up && cooldown_elapsed {
                 let current = self.batch_limit as f64;
 
                 let new_limit = if self.smoothed_ms > PRESSURE_THRESHOLD_MS {
-                    // Under pressure: gradually move toward the minimum limit
-                    // rather than jumping by a fixed multiplier.  Uses the
-                    // standard lerp(a, b, t) = a*(1-t) + b*t formulation so
-                    // that each adjustment closes LERP_STEP of the remaining
-                    // gap, giving smooth geometric convergence.
+                    // Under pressure: gradually move toward the minimum limit.
+                    // Uses the standard lerp(a, b, t) = a*(1-t) + b*t
+                    // formulation so that each adjustment closes LERP_STEP_DOWN
+                    // of the remaining gap, giving smooth geometric convergence.
                     // `floor` ensures we always move strictly toward MIN and
                     // that the limit can reach MIN_BATCH_LIMIT exactly when the
                     // gap becomes < 1.0.
-                    let new = current * (1.0 - LERP_STEP) + MIN_BATCH_LIMIT as f64 * LERP_STEP;
+                    let new = current * (1.0 - LERP_STEP_DOWN)
+                        + MIN_BATCH_LIMIT as f64 * LERP_STEP_DOWN;
                     Some((new.floor() as usize).max(MIN_BATCH_LIMIT))
                 } else if self.smoothed_ms < RELIEF_THRESHOLD_MS
                     && self.batch_limit < MAX_BATCH_LIMIT
                 {
                     // Headroom available: gradually recover toward the maximum.
+                    // Uses the smaller LERP_STEP_UP so recovery is deliberately
+                    // conservative — a fast ramp-up after a pressure event risks
+                    // triggering another reduction immediately (sawtooth).
                     // `ceil` ensures we always move strictly toward MAX and that
                     // the limit can reach MAX_BATCH_LIMIT exactly when the
                     // remaining gap shrinks below 1.0, avoiding an infinite
                     // near-ceiling stall.
-                    let new = current * (1.0 - LERP_STEP) + MAX_BATCH_LIMIT as f64 * LERP_STEP;
+                    let new =
+                        current * (1.0 - LERP_STEP_UP) + MAX_BATCH_LIMIT as f64 * LERP_STEP_UP;
                     Some((new.ceil() as usize).min(MAX_BATCH_LIMIT))
                 } else {
                     None
@@ -179,6 +206,17 @@ impl FrameMetrics {
         self.batch_limit
     }
 }
+
+// GPU-side timing is not used as a secondary signal for batch-limit control.
+//
+// `wgpu::Queue::submit` returns a `SubmissionIndex` but does not expose
+// queue depth, fence latency, or elapsed GPU time.  Obtaining those would
+// require enabling the `TIMESTAMP_QUERY` / `TIMESTAMP_QUERY_INSIDE_PASSES`
+// device features and wiring up a query-set pipeline — neither of which is
+// set up here.  Calling `Device::poll` synchronously in the render hot-path
+// to approximate GPU completion time would stall the CPU thread and negate
+// any benefit.  Wall-clock frame time (the EMA tracked above) is therefore
+// the sole signal used to drive the controller.
 
 /// Creates a wgpu instance with Ruffle's required configuration.
 ///
