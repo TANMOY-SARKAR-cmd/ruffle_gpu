@@ -226,7 +226,8 @@ impl H264Decoder {
             let ret = openh264.WelsCreateDecoder(&mut decoder);
             assert!(
                 ret == 0 && !decoder.is_null(),
-                "OpenH264 WelsCreateDecoder failed (code: {ret})"
+                "OpenH264 WelsCreateDecoder failed (code: {})",
+                ret
             );
 
             let decoder_vtbl = (*decoder)
