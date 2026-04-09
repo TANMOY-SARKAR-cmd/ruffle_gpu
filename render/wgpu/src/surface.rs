@@ -79,6 +79,7 @@ impl Surface {
         commands: CommandList,
         layer: LayerRef,
         texture_pool: &mut TexturePool,
+        batch_limit: usize,
     ) {
         let target = self.draw_commands(
             render_target_mode,
@@ -90,6 +91,7 @@ impl Surface {
             draw_encoder,
             layer,
             texture_pool,
+            batch_limit,
         );
 
         run_copy_pipeline(
@@ -118,6 +120,7 @@ impl Surface {
         draw_encoder: &'frame mut wgpu::CommandEncoder,
         nearest_layer: LayerRef<'frame>,
         texture_pool: &mut TexturePool,
+        batch_limit: usize,
     ) -> CommandTarget {
         let target = CommandTarget::new(
             descriptors,
@@ -146,6 +149,7 @@ impl Surface {
                 layer => layer,
             },
             texture_pool,
+            batch_limit,
         );
 
         for chunk in chunks {

@@ -34,9 +34,103 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Instant;
 use swf::Color;
 use tracing::instrument;
 use wgpu::SubmissionIndex;
+
+/// Minimum batch size limit: never go below 256 instances per batch.
+const MIN_BATCH_LIMIT: usize = 256;
+/// Maximum batch size limit: never exceed the hard-coded original cap.
+const MAX_BATCH_LIMIT: usize = 16_384;
+
+/// Exponential-moving-average smoothing factor for frame-time tracking.
+/// A value of 0.1 weights the most recent frame at 10% and history at 90%,
+/// giving a stable estimate that reacts to sustained load changes within ~10
+/// frames without over-reacting to single-frame spikes.
+const EMA_ALPHA: f64 = 0.1;
+
+/// If the smoothed frame time (ms) exceeds this threshold, reduce batch limits.
+const PRESSURE_THRESHOLD_MS: f64 = 33.0; // ≈30 FPS
+
+/// If the smoothed frame time (ms) is below this threshold, raise batch limits.
+const RELIEF_THRESHOLD_MS: f64 = 20.0; // ≈50 FPS
+
+/// Multiplicative step applied each time the limit is adjusted.
+const STEP_FACTOR: f64 = 0.75;
+
+/// Lightweight adaptive performance tracker.
+///
+/// Measures wall-clock time between consecutive `submit_frame` calls, maintains
+/// a smoothed (EMA) frame time, and derives a `batch_limit` that is used in
+/// place of the hard-coded `MAX_BATCH_RECTS` / `MAX_BATCH_BITMAPS` constants.
+///
+/// # Safety guarantees
+/// * The batch limit only changes *how many* instances are packed into a single
+///   GPU draw call before an automatic flush; it never changes *which* commands
+///   are issued or *when* a frame is presented.
+/// * ActionScript execution is not touched.
+/// * No frames are skipped or merged.
+struct FrameMetrics {
+    /// Whether at least one frame has been measured.  Used to suppress the EMA
+    /// update on the very first call to `end_frame`, when there is no prior
+    /// sample to incorporate.
+    initialized: bool,
+    /// Exponential moving average of frame duration in milliseconds.
+    smoothed_ms: f64,
+    /// Current adaptive batch limit (shared for both rect and bitmap batches).
+    batch_limit: usize,
+}
+
+impl FrameMetrics {
+    fn new() -> Self {
+        Self {
+            initialized: false,
+            smoothed_ms: 16.67, // start assuming 60 FPS
+            batch_limit: MAX_BATCH_LIMIT,
+        }
+    }
+
+    /// Call at the **start** of `submit_frame`.  Returns the `Instant` that
+    /// should be passed to `end_frame` after GPU submission completes.
+    fn begin_frame(&mut self) -> Instant {
+        Instant::now()
+    }
+
+    /// Call at the **end** of `submit_frame` with the `Instant` from
+    /// `begin_frame`.  Updates the EMA and adjusts the batch limit.
+    fn end_frame(&mut self, started_at: Instant) {
+        let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+
+        if self.initialized {
+            // Update EMA.
+            self.smoothed_ms =
+                EMA_ALPHA * elapsed_ms + (1.0 - EMA_ALPHA) * self.smoothed_ms;
+
+            // Adapt the batch limit based on sustained frame-time pressure.
+            if self.smoothed_ms > PRESSURE_THRESHOLD_MS {
+                // Under pressure: reduce batch limit to keep per-frame CPU/GPU
+                // upload cost lower, giving other systems more headroom.
+                let new = ((self.batch_limit as f64) * STEP_FACTOR) as usize;
+                self.batch_limit = new.max(MIN_BATCH_LIMIT);
+            } else if self.smoothed_ms < RELIEF_THRESHOLD_MS
+                && self.batch_limit < MAX_BATCH_LIMIT
+            {
+                // Plenty of headroom: increase limit back toward the maximum.
+                let new = ((self.batch_limit as f64) / STEP_FACTOR) as usize;
+                self.batch_limit = new.min(MAX_BATCH_LIMIT);
+            }
+        }
+
+        self.initialized = true;
+    }
+
+    /// Current batch-size limit to use for both rect and bitmap instanced
+    /// batches.  Always in `[MIN_BATCH_LIMIT, MAX_BATCH_LIMIT]`.
+    fn batch_limit(&self) -> usize {
+        self.batch_limit
+    }
+}
 
 /// Creates a wgpu instance with Ruffle's required configuration.
 ///
@@ -76,6 +170,10 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     pub(crate) offscreen_buffer_pool: Arc<BufferPool<wgpu::Buffer, BufferDimensions>>,
     dynamic_transforms: DynamicTransforms,
     active_frame: ActiveFrame,
+    /// Lightweight adaptive performance tracker.  Measures per-frame wall-clock
+    /// time and derives a batch-size limit that is threaded through the rendering
+    /// pipeline.  Has no effect on game logic or ActionScript execution.
+    frame_metrics: FrameMetrics,
 }
 
 impl WgpuRenderBackend<SwapChainTarget> {
@@ -248,6 +346,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             offscreen_buffer_pool: Arc::new(offscreen_buffer_pool),
             dynamic_transforms: transforms,
             active_frame,
+            frame_metrics: FrameMetrics::new(),
         })
     }
 
@@ -503,6 +602,13 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         commands: CommandList,
         cache_entries: Vec<BitmapCacheEntry>,
     ) {
+        // ── Frame-time measurement ────────────────────────────────────────────
+        // Record the wall-clock start so we can measure total frame cost and
+        // update the adaptive batch-limit after submission completes.  This is
+        // purely a performance hint; it does not affect game logic or AS3.
+        let frame_start = self.frame_metrics.begin_frame();
+        let batch_limit = self.frame_metrics.batch_limit();
+
         let frame_output = match self.target.get_next_texture() {
             Ok(frame) => frame,
             Err(e) => {
@@ -545,6 +651,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &mut self.active_frame.command_encoder,
                     LayerRef::None,
                     &mut self.offscreen_texture_pool,
+                    batch_limit,
                 );
             } else {
                 // We're relying on there being no impotent filters here,
@@ -569,6 +676,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &mut self.active_frame.command_encoder,
                     LayerRef::None,
                     &mut self.offscreen_texture_pool,
+                    batch_limit,
                 );
                 for filter in entry.filters {
                     target = self.descriptors.filters.apply(
@@ -614,12 +722,16 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             commands,
             LayerRef::None,
             &mut self.texture_pool,
+            batch_limit,
         );
         self.active_frame.staging_belt.finish();
 
         self.active_frame
             .submit_for_target(&self.descriptors, &self.target, frame_output);
         self.offscreen_texture_pool = TexturePool::new();
+
+        // ── Update adaptive metrics after the frame has been submitted ────────
+        self.frame_metrics.end_frame(frame_start);
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -774,6 +886,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             commands,
             LayerRef::Current,
             &mut self.offscreen_texture_pool,
+            self.frame_metrics.batch_limit(),
         );
 
         self.active_frame.maybe_flush(&self.descriptors);

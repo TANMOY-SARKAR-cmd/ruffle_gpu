@@ -7,7 +7,7 @@ use crate::dynamic_transforms::DynamicTransforms;
 use crate::mesh::{DrawType, Mesh, as_mesh};
 use crate::surface::Surface;
 use crate::surface::target::CommandTarget;
-use crate::{Descriptors, MaskState, Pipelines, RectInstance, Transforms, as_texture};
+use crate::{Descriptors, MaskState, Pipelines, BitmapInstance, RectInstance, Transforms, as_texture};
 use ruffle_render::backend::ShapeHandle;
 use ruffle_render::bitmap::{BitmapHandle, PixelSnapping};
 use ruffle_render::commands::{CommandHandler, CommandList, RenderBlendMode};
@@ -22,11 +22,6 @@ use wgpu::Backend;
 use wgpu::util::DeviceExt;
 
 use super::target::PoolOrArcTexture;
-
-/// Maximum number of rectangles accumulated in a single `DrawRectInstanced`
-/// batch before it is automatically flushed.  Each rect occupies one
-/// `RectInstance` (40 bytes), so 16 384 rects ≈ 640 KiB.
-const MAX_BATCH_RECTS: usize = 16_384;
 
 /// Normalise a [`swf::Color`] to premultiplied linear RGBA in `[0.0, 1.0]`.
 #[inline]
@@ -56,6 +51,11 @@ pub struct CommandRenderer<'pass, 'frame: 'pass, 'global: 'frame> {
     /// Cache key for the currently-bound index buffer. Stored as a raw pointer
     /// used for identity comparison only; it is never dereferenced.
     current_index_buffer: Option<*const wgpu::Buffer>,
+    /// Cache key for the bind group currently bound at group 1 by the
+    /// bitmap-instanced pipeline.  Set by `draw_bitmap_instanced`; cleared
+    /// whenever `set_transform_bind_group` rebinds group 1 for a non-instanced
+    /// draw, ensuring the next instanced draw always re-binds correctly.
+    current_group1_bitmap_bind_group: Option<*const wgpu::BindGroup>,
 }
 
 impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'global> {
@@ -82,6 +82,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             current_stencil_reference: None,
             current_vertex_buffer: None,
             current_index_buffer: None,
+            current_group1_bitmap_bind_group: None,
         }
     }
 
@@ -113,6 +114,23 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             &[transform_buffer],
         );
         self.current_transform_offset = Some(transform_buffer);
+        // Group 1 now holds the transform uniform; any previously cached bitmap
+        // bind group at group 1 is no longer current.
+        self.current_group1_bitmap_bind_group = None;
+    }
+
+    /// Bind a bitmap's bind group at group 1, skipping the GPU command if the
+    /// same bind group is already bound.  Also clears `current_transform_offset`
+    /// so that the next non-instanced draw will correctly rebind group 1 with
+    /// its own transform uniform.
+    fn set_group1_bitmap_bind_group_cached(&mut self, bind_group: &'pass wgpu::BindGroup) {
+        let ptr = bind_group as *const wgpu::BindGroup;
+        if self.current_group1_bitmap_bind_group != Some(ptr) {
+            self.render_pass.set_bind_group(1, bind_group, &[]);
+            self.current_group1_bitmap_bind_group = Some(ptr);
+        }
+        // Invalidate the transform cache so the next non-instanced draw rebinds.
+        self.current_transform_offset = None;
     }
 
     fn set_stencil_reference_cached(&mut self, stencil_reference: u32) {
@@ -182,6 +200,13 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
                 *blend_mode,
                 *render_stage3d,
             ),
+            DrawCommand::DrawBitmapInstanced {
+                bitmap,
+                instances,
+                num_instances,
+                smoothing,
+                blend_mode,
+            } => self.draw_bitmap_instanced(bitmap, instances, *num_instances, *smoothing, *blend_mode),
             DrawCommand::RenderTexture {
                 _texture,
                 binds,
@@ -203,6 +228,9 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
                 instances,
                 num_instances,
             } => self.draw_rect_instanced(instances, *num_instances),
+            DrawCommand::PendingRectBatch(_) | DrawCommand::PendingBitmapBatch { .. } => {
+                unreachable!("pending batch commands must be consumed by optimize_draw_commands before rendering")
+            }
             DrawCommand::PushMask => self.push_mask(),
             DrawCommand::ActivateMask => self.activate_mask(),
             DrawCommand::DeactivateMask => self.deactivate_mask(),
@@ -489,6 +517,77 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         }
     }
 
+    /// Draw a batch of bitmap instances using GPU instancing.
+    ///
+    /// `instances` holds one `BitmapInstance` per bitmap (affine transform +
+    /// color transforms).  All instances share the same texture (`bitmap`,
+    /// `smoothing`) and `blend_mode`.  The shared unit-quad geometry is read
+    /// from `descriptors.quad.vertices_pos` and `descriptors.quad.indices`.
+    /// A single `draw_indexed` call renders all instances at once.
+    pub fn draw_bitmap_instanced(
+        &mut self,
+        bitmap: &'frame BitmapHandle,
+        instances: &'pass wgpu::Buffer,
+        num_instances: u32,
+        smoothing: bool,
+        blend_mode: TrivialBlend,
+    ) {
+        if cfg!(feature = "render_debug_labels") {
+            self.render_pass
+                .push_debug_group(&format!("draw_bitmap_instanced {:?}", bitmap.0));
+        }
+        let texture = as_texture(bitmap);
+        let descriptors = self.descriptors;
+        let bind = texture.bind_group(
+            smoothing,
+            &descriptors.device,
+            &descriptors.bind_layouts.bitmap,
+            &descriptors.quad,
+            bitmap.clone(),
+            &descriptors.bitmap_samplers,
+        );
+
+        // Select the bitmap-instanced pipeline.
+        // The pipeline layout is [globals(0), bitmap(1)] — no per-object
+        // transform uniform at group 1.
+        if self.needs_stencil {
+            self.set_pipeline_cached(
+                self.pipelines.bitmap_instanced[blend_mode].pipeline_for(self.mask_state),
+            );
+        } else {
+            self.set_pipeline_cached(
+                self.pipelines.bitmap_instanced[blend_mode].stencilless_pipeline(),
+            );
+        }
+
+        // Bind the bitmap (texture + sampler + texture_transforms) at group 1.
+        // Uses pointer-equality caching to skip the GPU command when the same
+        // texture batch runs consecutively.  `current_transform_offset` is
+        // always cleared so the next non-instanced draw will rebind group 1.
+        self.set_group1_bitmap_bind_group_cached(&bind.bind_group);
+
+        // Slot 0: shared unit-quad positions (four corners [0,1]×[0,1]).
+        self.render_pass
+            .set_vertex_buffer(0, self.descriptors.quad.vertices_pos.slice(..));
+        // Slot 1: per-bitmap instance data (varies per batch).
+        self.render_pass.set_vertex_buffer(1, instances.slice(..));
+        // Shared quad index buffer [0, 1, 2, 0, 2, 3] — two triangles.
+        self.render_pass.set_index_buffer(
+            self.descriptors.quad.indices.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
+        self.render_pass.draw_indexed(0..6, 0, 0..num_instances);
+
+        // Invalidate the slot-0 and index-buffer caches so that the next
+        // non-instanced draw correctly re-binds its own buffers.
+        self.current_vertex_buffer = None;
+        self.current_index_buffer = None;
+
+        if cfg!(feature = "render_debug_labels") {
+            self.render_pass.pop_debug_group();
+        }
+    }
+
     pub fn draw_lines<const RECT: bool>(&mut self, transform_buffer: wgpu::DynamicOffset) {
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.push_debug_group("draw_lines");
@@ -595,14 +694,46 @@ pub enum DrawCommand {
     DrawLineRect {
         transform_buffer: wgpu::DynamicOffset,
     },
+    /// A batch of bitmap instances rendered with a single instanced draw call.
+    /// The `instances` buffer contains one `BitmapInstance` per bitmap: a 2D
+    /// affine transform and a color transform.  All instances share the same
+    /// texture (identified by `bitmap`), sampler (`smoothing`), and `blend_mode`.
+    ///
+    /// Produced by `optimize_draw_commands` after merging `PendingBitmapBatch`
+    /// commands.  Never appears as a pre-optimization intermediate.
+    DrawBitmapInstanced {
+        bitmap: BitmapHandle,
+        instances: wgpu::Buffer,
+        num_instances: u32,
+        smoothing: bool,
+        blend_mode: TrivialBlend,
+    },
     /// A batch of solid-colour rectangles rendered with a single instanced
     /// draw call.  The `instances` buffer contains one `RectInstance` per
     /// rectangle: a 2D affine transform (ab, cd, txty) and a premultiplied
     /// RGBA colour.  The GPU applies the transform to the shared unit-quad
     /// geometry, so no index buffer needs to be supplied per batch.
+    ///
+    /// Produced by `optimize_draw_commands` after merging `PendingRectBatch`
+    /// commands.  Never appears as a pre-optimization intermediate.
     DrawRectInstanced {
         instances: wgpu::Buffer,
         num_instances: u32,
+    },
+    /// Accumulated rect instances that have not yet been GPU-materialized.
+    /// Emitted by `flush_rect_batch`; consumed (and transformed into
+    /// `DrawRectInstanced`) by `optimize_draw_commands`.  Never reaches the
+    /// renderer.
+    PendingRectBatch(Vec<RectInstance>),
+    /// Accumulated bitmap instances that have not yet been GPU-materialized.
+    /// Emitted by `flush_bitmap_batch`; consumed (and transformed into
+    /// `DrawBitmapInstanced`) by `optimize_draw_commands`.  Never reaches the
+    /// renderer.
+    PendingBitmapBatch {
+        bitmap: BitmapHandle,
+        bitmaps: Vec<BitmapInstance>,
+        smoothing: bool,
+        blend_mode: TrivialBlend,
     },
     /// Single pre-transformed colored rectangle (legacy path, kept as a safe
     /// fallback; not currently generated but matched in `execute`).
@@ -623,6 +754,154 @@ pub enum LayerRef<'a> {
     Parent(&'a CommandTarget),
 }
 
+/// Post-process a `Vec<DrawCommand>`, merging consecutive compatible pending
+/// batch commands into a single GPU-backed draw call, then materialise the
+/// GPU `wgpu::Buffer` for each merged batch exactly once.
+///
+/// **Safe merges (bounded by `batch_limit`):**
+/// * Consecutive `PendingRectBatch` commands — same pipeline, no per-batch
+///   GPU state; their instance data can be concatenated while preserving order.
+/// * Consecutive `PendingBitmapBatch` commands that share the same
+///   `(bitmap, smoothing, blend_mode)` key — same texture and pipeline.
+///
+/// Both kinds of merge stop as soon as adding the next pending batch would
+/// push the combined `num_instances` above `batch_limit`, ensuring the
+/// adaptive flush threshold is respected end-to-end.
+///
+/// GPU buffers are created **once per final merged run**, eliminating the
+/// quadratic reallocation of the old pairwise approach.
+fn optimize_draw_commands(
+    commands: Vec<DrawCommand>,
+    device: &wgpu::Device,
+    batch_limit: usize,
+) -> Vec<DrawCommand> {
+    // ── helpers ───────────────────────────────────────────────────────────
+    fn emit_rect_run(
+        run: &mut Vec<RectInstance>,
+        out: &mut Vec<DrawCommand>,
+        device: &wgpu::Device,
+    ) {
+        if run.is_empty() {
+            return;
+        }
+        let num_instances = run.len() as u32;
+        let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: create_debug_label!("Rect instanced buffer").as_deref(),
+            contents: bytemuck::cast_slice(run),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        run.clear();
+        out.push(DrawCommand::DrawRectInstanced {
+            instances,
+            num_instances,
+        });
+    }
+
+    fn emit_bitmap_run(
+        run: &mut Option<(BitmapHandle, bool, TrivialBlend, Vec<BitmapInstance>)>,
+        out: &mut Vec<DrawCommand>,
+        device: &wgpu::Device,
+    ) {
+        let Some((bitmap, smoothing, blend_mode, bitmaps)) = run.take() else {
+            return;
+        };
+        if bitmaps.is_empty() {
+            return;
+        }
+        let num_instances = bitmaps.len() as u32;
+        let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: create_debug_label!("Bitmap instanced buffer").as_deref(),
+            contents: bytemuck::cast_slice(&bitmaps),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        out.push(DrawCommand::DrawBitmapInstanced {
+            bitmap,
+            instances,
+            num_instances,
+            smoothing,
+            blend_mode,
+        });
+    }
+    // ── main pass ─────────────────────────────────────────────────────────
+    let mut out: Vec<DrawCommand> = Vec::with_capacity(commands.len());
+    let mut rect_run: Vec<RectInstance> = Vec::new();
+    let mut bitmap_run: Option<(BitmapHandle, bool, TrivialBlend, Vec<BitmapInstance>)> = None;
+
+    for cmd in commands {
+        match cmd {
+            // ── Rect batches ──────────────────────────────────────────────
+            DrawCommand::PendingRectBatch(mut new_rects) => {
+                // Different type: flush any in-progress bitmap run.
+                emit_bitmap_run(&mut bitmap_run, &mut out, device);
+
+                // If adding new_rects would exceed the limit, flush the
+                // current rect run first.
+                if !rect_run.is_empty()
+                    && rect_run.len() + new_rects.len() > batch_limit
+                {
+                    emit_rect_run(&mut rect_run, &mut out, device);
+                }
+                rect_run.append(&mut new_rects);
+                // Emit immediately if we hit the cap exactly.
+                if rect_run.len() >= batch_limit {
+                    emit_rect_run(&mut rect_run, &mut out, device);
+                }
+            }
+
+            // ── Bitmap batches ────────────────────────────────────────────
+            DrawCommand::PendingBitmapBatch {
+                bitmap,
+                mut bitmaps,
+                smoothing,
+                blend_mode,
+            } => {
+                // Different type: flush any in-progress rect run.
+                emit_rect_run(&mut rect_run, &mut out, device);
+
+                let same_key = bitmap_run.as_ref().map_or(false, |(pb, ps, pbl, _)| {
+                    *pb == bitmap
+                        && *ps == smoothing
+                        && mem::discriminant(pbl) == mem::discriminant(&blend_mode)
+                });
+
+                if !same_key {
+                    // New key: commit the previous bitmap run (if any) and
+                    // start a fresh one.
+                    emit_bitmap_run(&mut bitmap_run, &mut out, device);
+                    bitmap_run = Some((bitmap, smoothing, blend_mode, bitmaps));
+                } else {
+                    // Same key: try to extend the current run.
+                    let (_, _, _, pending) = bitmap_run.as_mut().unwrap();
+                    if !pending.is_empty() && pending.len() + bitmaps.len() > batch_limit {
+                        // Would exceed the limit: emit the current run and
+                        // start a new one with this batch.
+                        emit_bitmap_run(&mut bitmap_run, &mut out, device);
+                        bitmap_run = Some((bitmap, smoothing, blend_mode, bitmaps));
+                    } else {
+                        pending.append(&mut bitmaps);
+                        if pending.len() >= batch_limit {
+                            emit_bitmap_run(&mut bitmap_run, &mut out, device);
+                        }
+                    }
+                }
+            }
+
+            // ── Everything else ───────────────────────────────────────────
+            other => {
+                emit_rect_run(&mut rect_run, &mut out, device);
+                emit_bitmap_run(&mut bitmap_run, &mut out, device);
+                out.push(other);
+            }
+        }
+    }
+
+    // Flush any trailing runs.
+    emit_rect_run(&mut rect_run, &mut out, device);
+    emit_bitmap_run(&mut bitmap_run, &mut out, device);
+
+    out
+}
+
 /// Replaces every blend with a RenderBitmap, with the subcommands rendered out to a temporary texture
 /// Every complex blend will be its own item, but every other draw will be chunked together
 #[expect(clippy::too_many_arguments)]
@@ -638,6 +917,7 @@ pub fn chunk_blends<'a>(
     height: u32,
     nearest_layer: LayerRef,
     texture_pool: &mut TexturePool,
+    batch_limit: usize,
 ) -> Vec<Chunk> {
     WgpuCommandHandler::new(
         descriptors,
@@ -650,6 +930,7 @@ pub fn chunk_blends<'a>(
         height,
         nearest_layer,
         texture_pool,
+        batch_limit,
     )
     .chunk_blends(commands)
 }
@@ -674,8 +955,20 @@ struct WgpuCommandHandler<'a> {
     needs_stencil: bool,
     num_masks: i32,
 
+    /// Adaptive batch size limit.  Controls the maximum number of instances
+    /// packed into a single `DrawRectInstanced` or `DrawBitmapInstanced` call
+    /// before an automatic flush.  Derived from `FrameMetrics`; does **not**
+    /// affect which commands are issued or the final rendered image.
+    batch_limit: usize,
+
     /// Accumulated per-rect instance data for the in-progress instanced batch.
     rect_instances: Vec<RectInstance>,
+
+    /// Accumulated per-bitmap instance data for the in-progress instanced bitmap batch.
+    bitmap_instances: Vec<BitmapInstance>,
+    /// Key identifying the current bitmap batch: (texture handle, smoothing, blend mode).
+    /// `None` means no bitmap batch is in progress.
+    bitmap_batch_key: Option<(BitmapHandle, bool, TrivialBlend)>,
 }
 
 impl<'a> WgpuCommandHandler<'a> {
@@ -691,6 +984,7 @@ impl<'a> WgpuCommandHandler<'a> {
         height: u32,
         nearest_layer: LayerRef<'a>,
         texture_pool: &'a mut TexturePool,
+        batch_limit: usize,
     ) -> Self {
         let transforms = Self::new_transforms(descriptors, dynamic_transforms);
 
@@ -719,7 +1013,12 @@ impl<'a> WgpuCommandHandler<'a> {
             needs_stencil: false,
             num_masks: 0,
 
+            batch_limit,
+
             rect_instances: Vec::new(),
+
+            bitmap_instances: Vec::new(),
+            bitmap_batch_key: None,
         }
     }
 
@@ -732,8 +1031,10 @@ impl<'a> WgpuCommandHandler<'a> {
         transforms
     }
 
-    /// Flush the accumulated instanced rect batch (if any) as a single
-    /// `DrawRectInstanced` command in `self.current`.  Clears the accumulator.
+    /// Flush the accumulated instanced rect batch (if any) as a
+    /// `PendingRectBatch` command in `self.current`.  The GPU buffer is
+    /// **not** created here; `optimize_draw_commands` materialises it later,
+    /// once after any merges, so the data is only copied once.
     ///
     /// Call this before emitting any command that is not a `draw_rect` so that
     /// draw order between batched rects and other draw calls is preserved.
@@ -741,22 +1042,30 @@ impl<'a> WgpuCommandHandler<'a> {
         if self.rect_instances.is_empty() {
             return;
         }
+        let rects = mem::take(&mut self.rect_instances);
+        self.current.push(DrawCommand::PendingRectBatch(rects));
+    }
 
-        let num_instances = self.rect_instances.len() as u32;
-        let instances = self
-            .descriptors
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: create_debug_label!("Rect instanced buffer").as_deref(),
-                contents: bytemuck::cast_slice(&self.rect_instances),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-        self.rect_instances.clear();
-
-        self.current.push(DrawCommand::DrawRectInstanced {
-            instances,
-            num_instances,
+    /// Flush the accumulated instanced bitmap batch (if any) as a
+    /// `PendingBitmapBatch` command in `self.current`.  The GPU buffer is
+    /// **not** created here; `optimize_draw_commands` materialises it later,
+    /// once after any merges, so the data is only copied once.
+    ///
+    /// Call this before emitting any command that is not a `render_bitmap` so
+    /// that draw order between batched bitmaps and other draw calls is preserved.
+    fn flush_bitmap_batch(&mut self) {
+        let Some((bitmap, smoothing, blend_mode)) = self.bitmap_batch_key.take() else {
+            return;
+        };
+        if self.bitmap_instances.is_empty() {
+            return;
+        }
+        let bitmaps = mem::take(&mut self.bitmap_instances);
+        self.current.push(DrawCommand::PendingBitmapBatch {
+            bitmap,
+            bitmaps,
+            smoothing,
+            blend_mode,
         });
     }
 
@@ -765,22 +1074,46 @@ impl<'a> WgpuCommandHandler<'a> {
     fn chunk_blends(&mut self, commands: CommandList) -> Vec<Chunk> {
         commands.execute(self);
 
-        // Flush any remaining rect batch before finalising the chunk.
+        // Flush any remaining batches before finalising the chunk.
         self.flush_rect_batch();
+        self.flush_bitmap_batch();
 
-        let current = mem::take(&mut self.current);
-        let mut result = mem::take(&mut self.result);
         let needs_stencil = mem::take(&mut self.needs_stencil);
         let transforms = mem::replace(
             &mut self.transforms,
             Self::new_transforms(self.descriptors, self.dynamic_transforms),
         );
 
-        if !current.is_empty() {
-            result.push(Chunk::Draw(current, needs_stencil, transforms));
+        // Optimise and push the final chunk (if non-empty).
+        if !self.current.is_empty() {
+            let cmds = optimize_draw_commands(
+                mem::take(&mut self.current),
+                &self.descriptors.device,
+                self.batch_limit,
+            );
+            self.result.push(Chunk::Draw(cmds, needs_stencil, transforms));
         }
 
-        result
+        mem::take(&mut self.result)
+    }
+
+    /// Move `self.current` into a finalized `Chunk::Draw` and push it to
+    /// `self.result`.  The command list is passed through `optimize_draw_commands`
+    /// first to merge any consecutive compatible batches.
+    ///
+    /// Resets `self.last_transform` so the next chunk starts fresh.
+    fn push_current_chunk(&mut self, transforms: BufferBuilder) {
+        if self.current.is_empty() {
+            return;
+        }
+        let cmds = optimize_draw_commands(
+            mem::take(&mut self.current),
+            &self.descriptors.device,
+            self.batch_limit,
+        );
+        self.result
+            .push(Chunk::Draw(cmds, self.needs_stencil, transforms));
+        self.last_transform = None;
     }
 
     fn add_to_current(
@@ -817,15 +1150,11 @@ impl<'a> WgpuCommandHandler<'a> {
             self.last_transform = Some((transform, transform_offset));
             self.current.push(command_builder(transform_offset));
         } else {
-            self.result.push(Chunk::Draw(
-                mem::take(&mut self.current),
-                self.needs_stencil,
-                mem::replace(
-                    &mut self.transforms,
-                    BufferBuilder::new_for_uniform(&self.descriptors.limits),
-                ),
-            ));
-            self.last_transform = None;
+            let old_transforms = mem::replace(
+                &mut self.transforms,
+                BufferBuilder::new_for_uniform(&self.descriptors.limits),
+            );
+            self.push_current_chunk(old_transforms);
             self.transforms
                 .set_buffer_limit(self.dynamic_transforms.buffer.size());
             let transform_range = self
@@ -841,8 +1170,9 @@ impl<'a> WgpuCommandHandler<'a> {
 
 impl CommandHandler for WgpuCommandHandler<'_> {
     fn blend(&mut self, commands: CommandList, blend_mode: RenderBlendMode) {
-        // Preserve draw order: flush any pending rect batch first.
+        // Preserve draw order: flush any pending batches first.
         self.flush_rect_batch();
+        self.flush_bitmap_batch();
 
         let mut surface = Surface::new(
             self.descriptors,
@@ -868,6 +1198,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.draw_encoder,
             target_layer,
             self.texture_pool,
+            self.batch_limit,
         );
         target.ensure_cleared(self.draw_encoder);
 
@@ -919,15 +1250,11 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             }
             blend_type => {
                 if !self.current.is_empty() {
-                    self.result.push(Chunk::Draw(
-                        mem::take(&mut self.current),
-                        self.needs_stencil,
-                        mem::replace(
-                            &mut self.transforms,
-                            BufferBuilder::new_for_uniform(&self.descriptors.limits),
-                        ),
-                    ));
-                    self.last_transform = None;
+                    let old_transforms = mem::replace(
+                        &mut self.transforms,
+                        BufferBuilder::new_for_uniform(&self.descriptors.limits),
+                    );
+                    self.push_current_chunk(old_transforms);
                 }
                 self.transforms
                     .set_buffer_limit(self.dynamic_transforms.buffer.size());
@@ -953,7 +1280,9 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         smoothing: bool,
         pixel_snapping: PixelSnapping,
     ) {
+        // Flush any pending rect batch to preserve draw order.
         self.flush_rect_batch();
+
         let mut matrix = transform.matrix;
         {
             let texture = as_texture(&bitmap);
@@ -963,18 +1292,44 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                 texture.texture.height() as f32,
             );
         }
-        self.add_to_current(matrix, transform.color_transform, |transform_buffer| {
-            DrawCommand::RenderBitmap {
-                bitmap,
-                transform_buffer,
-                smoothing,
-                blend_mode: TrivialBlend::Normal,
-                render_stage3d: false,
+
+        // The instanced bitmap pipeline always uses normal (premultiplied-alpha) blending.
+        let blend_mode = TrivialBlend::Normal;
+
+        // Flush the bitmap batch if the batch key changes (different texture,
+        // smoothing setting, or blend mode).
+        // `BitmapHandle::PartialEq` uses `Arc::ptr_eq`, so equality holds between
+        // any two handles that were cloned from the same original — i.e. they
+        // share the same underlying GPU texture allocation.
+        if let Some((ref key_bitmap, key_smoothing, key_blend)) = self.bitmap_batch_key {
+            if *key_bitmap != bitmap
+                || key_smoothing != smoothing
+                || mem::discriminant(&key_blend) != mem::discriminant(&blend_mode)
+            {
+                self.flush_bitmap_batch();
             }
+        }
+        self.bitmap_batch_key = Some((bitmap, smoothing, blend_mode));
+        self.bitmap_instances.push(BitmapInstance {
+            x_axis:      [matrix.a, matrix.b],
+            y_axis:      [matrix.c, matrix.d],
+            translation: [matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32],
+            mult_color:  transform.color_transform.mult_rgba_normalized(),
+            add_color:   transform.color_transform.add_rgba_normalized(),
+            // Full texture: UV maps [0,1]×[0,1] to [0,0]–[1,1].
+            uv_rect:     [0.0, 0.0, 1.0, 1.0],
         });
+
+        // Flush when the batch reaches the size limit.
+        if self.bitmap_instances.len() >= self.batch_limit {
+            self.flush_bitmap_batch();
+        }
     }
+
     fn render_stage3d(&mut self, bitmap: BitmapHandle, transform: Transform) {
+        // Stage3D renders are rare and always opaque; keep the simple per-draw path.
         self.flush_rect_batch();
+        self.flush_bitmap_batch();
         let mut matrix = transform.matrix;
         {
             let texture = as_texture(&bitmap);
@@ -996,6 +1351,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
 
     fn render_shape(&mut self, shape: ShapeHandle, transform: Transform) {
         self.flush_rect_batch();
+        self.flush_bitmap_batch();
         self.add_to_current(
             transform.matrix,
             transform.color_transform,
@@ -1007,6 +1363,8 @@ impl CommandHandler for WgpuCommandHandler<'_> {
     }
 
     fn draw_rect(&mut self, color: Color, matrix: Matrix) {
+        // Flush any pending bitmap batch to preserve draw order.
+        self.flush_bitmap_batch();
         // Build a RectInstance: pack the raw matrix components and
         // premultiplied colour directly, without computing world-space vertex
         // positions on the CPU.  The vertex shader applies the affine transform
@@ -1019,13 +1377,14 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         });
 
         // Flush when the batch reaches the size limit.
-        if self.rect_instances.len() >= MAX_BATCH_RECTS {
+        if self.rect_instances.len() >= self.batch_limit {
             self.flush_rect_batch();
         }
     }
 
     fn draw_line(&mut self, color: Color, mut matrix: Matrix) {
         self.flush_rect_batch();
+        self.flush_bitmap_batch();
         if self.emulate_lines {
             let mut cl = CommandList::new();
             emulate_line(&mut cl, color, matrix);
@@ -1043,6 +1402,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
 
     fn draw_line_rect(&mut self, color: Color, mut matrix: Matrix) {
         self.flush_rect_batch();
+        self.flush_bitmap_batch();
         if self.emulate_lines {
             let mut cl = CommandList::new();
             emulate_line_rect(&mut cl, color, matrix);
@@ -1060,6 +1420,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
 
     fn push_mask(&mut self) {
         self.flush_rect_batch();
+        self.flush_bitmap_batch();
         self.needs_stencil = true;
         self.num_masks += 1;
         self.current.push(DrawCommand::PushMask);
@@ -1067,18 +1428,21 @@ impl CommandHandler for WgpuCommandHandler<'_> {
 
     fn activate_mask(&mut self) {
         self.flush_rect_batch();
+        self.flush_bitmap_batch();
         self.needs_stencil = true;
         self.current.push(DrawCommand::ActivateMask);
     }
 
     fn deactivate_mask(&mut self) {
         self.flush_rect_batch();
+        self.flush_bitmap_batch();
         self.needs_stencil = true;
         self.current.push(DrawCommand::DeactivateMask);
     }
 
     fn pop_mask(&mut self) {
         self.flush_rect_batch();
+        self.flush_bitmap_batch();
         self.needs_stencil = true;
         self.num_masks -= 1;
         self.current.push(DrawCommand::PopMask);
@@ -1086,6 +1450,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
 
     fn render_alpha_mask(&mut self, maskee_commands: CommandList, mask_commands: CommandList) {
         self.flush_rect_batch();
+        self.flush_bitmap_batch();
         let mut surface = Surface::new(
             self.descriptors,
             self.quality,
@@ -1104,6 +1469,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.draw_encoder,
             LayerRef::None,
             self.texture_pool,
+            self.batch_limit,
         );
         maskee.ensure_cleared(self.draw_encoder);
         let matrix = Matrix::scale(maskee.width() as f32, maskee.height() as f32);
@@ -1119,6 +1485,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.draw_encoder,
             LayerRef::None,
             self.texture_pool,
+            self.batch_limit,
         );
         mask.ensure_cleared(self.draw_encoder);
         let mask = mask.take_color_texture();
