@@ -36,6 +36,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-tags: true
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -104,6 +106,7 @@ jobs:
       - name: Create GitHub Release and upload binaries
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
@@ -132,6 +135,4 @@ jobs:
 
             Run with `--help` for a full list of options.
           files: |
-            artifacts/ruffle-linux-x86_64/ruffle-linux-x86_64
-            artifacts/ruffle-windows-x86_64.exe/ruffle-windows-x86_64.exe
-            artifacts/ruffle-macos-x86_64/ruffle-macos-x86_64
+            artifacts/**/*
