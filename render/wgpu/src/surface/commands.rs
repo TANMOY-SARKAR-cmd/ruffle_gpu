@@ -61,6 +61,11 @@ pub struct CommandRenderer<'pass, 'frame: 'pass, 'global: 'frame> {
     /// Cache key for the currently-bound index buffer. Stored as a raw pointer
     /// used for identity comparison only; it is never dereferenced.
     current_index_buffer: Option<*const wgpu::Buffer>,
+    /// Cache key for the bind group currently bound at group 1 by the
+    /// bitmap-instanced pipeline.  Set by `draw_bitmap_instanced`; cleared
+    /// whenever `set_transform_bind_group` rebinds group 1 for a non-instanced
+    /// draw, ensuring the next instanced draw always re-binds correctly.
+    current_group1_bitmap_bind_group: Option<*const wgpu::BindGroup>,
 }
 
 impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'global> {
@@ -87,6 +92,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             current_stencil_reference: None,
             current_vertex_buffer: None,
             current_index_buffer: None,
+            current_group1_bitmap_bind_group: None,
         }
     }
 
@@ -118,6 +124,23 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             &[transform_buffer],
         );
         self.current_transform_offset = Some(transform_buffer);
+        // Group 1 now holds the transform uniform; any previously cached bitmap
+        // bind group at group 1 is no longer current.
+        self.current_group1_bitmap_bind_group = None;
+    }
+
+    /// Bind a bitmap's bind group at group 1, skipping the GPU command if the
+    /// same bind group is already bound.  Also clears `current_transform_offset`
+    /// so that the next non-instanced draw will correctly rebind group 1 with
+    /// its own transform uniform.
+    fn set_group1_bitmap_bind_group_cached(&mut self, bind_group: &'pass wgpu::BindGroup) {
+        let ptr = bind_group as *const wgpu::BindGroup;
+        if self.current_group1_bitmap_bind_group != Some(ptr) {
+            self.render_pass.set_bind_group(1, bind_group, &[]);
+            self.current_group1_bitmap_bind_group = Some(ptr);
+        }
+        // Invalidate the transform cache so the next non-instanced draw rebinds.
+        self.current_transform_offset = None;
     }
 
     fn set_stencil_reference_cached(&mut self, stencil_reference: u32) {
@@ -545,11 +568,10 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         }
 
         // Bind the bitmap (texture + sampler + texture_transforms) at group 1.
-        // This overwrites whatever transform uniform was previously bound to
-        // group 1 by a non-instanced draw, so invalidate the cached offset to
-        // force a rebind on the next non-instanced draw.
-        self.render_pass.set_bind_group(1, &bind.bind_group, &[]);
-        self.current_transform_offset = None;
+        // Uses pointer-equality caching to skip the GPU command when the same
+        // texture batch runs consecutively.  `current_transform_offset` is
+        // always cleared so the next non-instanced draw will rebind group 1.
+        self.set_group1_bitmap_bind_group_cached(&bind.bind_group);
 
         // Slot 0: shared unit-quad positions (four corners [0,1]×[0,1]).
         self.render_pass
@@ -1126,6 +1148,8 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             translation: [matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32],
             mult_color:  transform.color_transform.mult_rgba_normalized(),
             add_color:   transform.color_transform.add_rgba_normalized(),
+            // Full texture: UV maps [0,1]×[0,1] to [0,0]–[1,1].
+            uv_rect:     [0.0, 0.0, 1.0, 1.0],
         });
 
         // Flush when the batch reaches the size limit.

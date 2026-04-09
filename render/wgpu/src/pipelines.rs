@@ -28,7 +28,8 @@ pub const VERTEX_BUFFERS_DESCRIPTION_COLOR: [wgpu::VertexBufferLayout; 1] =
 ///
 /// Slot 0 (`Vertex` step): unit-quad positions from the shared `Quad` buffer.
 /// Slot 1 (`Instance` step): per-bitmap `BitmapInstance` data — affine transform
-/// (ab, cd, txty), multiplicative color (mult_color), and additive color (add_color).
+/// (ab, cd, txty), multiplicative color (mult_color), additive color (add_color),
+/// and UV sub-rectangle (uv_rect).
 pub const VERTEX_BUFFERS_DESCRIPTION_BITMAP_INSTANCED: [wgpu::VertexBufferLayout; 2] = [
     wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<PosVertex>() as u64,
@@ -44,6 +45,7 @@ pub const VERTEX_BUFFERS_DESCRIPTION_BITMAP_INSTANCED: [wgpu::VertexBufferLayout
             3 => Float32x2,  // translation
             4 => Float32x4,  // mult_color
             5 => Float32x4,  // add_color
+            6 => Float32x4,  // uv_rect
         ],
     },
 ];
