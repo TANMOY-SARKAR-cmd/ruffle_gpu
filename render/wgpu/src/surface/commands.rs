@@ -1103,17 +1103,23 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             );
         }
 
+        // The instanced bitmap pipeline always uses normal (premultiplied-alpha) blending.
+        let blend_mode = TrivialBlend::Normal;
+
         // Flush the bitmap batch if the batch key changes (different texture,
         // smoothing setting, or blend mode).
+        // `BitmapHandle::PartialEq` uses `Arc::ptr_eq`, so equality holds between
+        // any two handles that were cloned from the same original — i.e. they
+        // share the same underlying GPU texture allocation.
         if let Some((ref key_bitmap, key_smoothing, key_blend)) = self.bitmap_batch_key {
             if *key_bitmap != bitmap
                 || key_smoothing != smoothing
-                || mem::discriminant(&key_blend) != mem::discriminant(&TrivialBlend::Normal)
+                || mem::discriminant(&key_blend) != mem::discriminant(&blend_mode)
             {
                 self.flush_bitmap_batch();
             }
         }
-        self.bitmap_batch_key = Some((bitmap, smoothing, TrivialBlend::Normal));
+        self.bitmap_batch_key = Some((bitmap, smoothing, blend_mode));
         self.bitmap_instances.push(BitmapInstance {
             x_axis:      [matrix.a, matrix.b],
             y_axis:      [matrix.c, matrix.d],
