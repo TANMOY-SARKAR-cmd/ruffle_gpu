@@ -1012,9 +1012,9 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         // positions on the CPU.  The vertex shader applies the affine transform
         // to the shared unit-quad geometry for each instance.
         self.rect_instances.push(RectInstance {
-            ab:   [matrix.a, matrix.b],
-            cd:   [matrix.c, matrix.d],
-            txty: [matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32],
+            x_axis:      [matrix.a, matrix.b],
+            y_axis:      [matrix.c, matrix.d],
+            translation: [matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32],
             color: color_to_premult_rgba(color),
         });
 

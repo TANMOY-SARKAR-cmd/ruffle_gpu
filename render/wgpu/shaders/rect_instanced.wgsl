@@ -18,10 +18,10 @@ struct VertexInput {
 };
 
 struct InstanceInput {
-    @location(1) ab:    vec2<f32>,   // world-matrix: [a, b]  (x-axis scale/shear)
-    @location(2) cd:    vec2<f32>,   // world-matrix: [c, d]  (y-axis shear/scale)
-    @location(3) txty:  vec2<f32>,   // world-space translation
-    @location(4) color: vec4<f32>,   // premultiplied RGBA in [0, 1]
+    @location(1) x_axis:      vec2<f32>,   // world-matrix column 0: [a, b]
+    @location(2) y_axis:      vec2<f32>,   // world-matrix column 1: [c, d]
+    @location(3) translation: vec2<f32>,   // world-space translation [tx, ty]
+    @location(4) color:       vec4<f32>,   // premultiplied RGBA in [0, 1]
 };
 
 struct VertexOutput {
@@ -32,8 +32,8 @@ struct VertexOutput {
 @vertex
 fn main_vertex(vert: VertexInput, inst: InstanceInput) -> VertexOutput {
     let world = vec2<f32>(
-        inst.ab.x * vert.position.x + inst.cd.x * vert.position.y + inst.txty.x,
-        inst.ab.y * vert.position.x + inst.cd.y * vert.position.y + inst.txty.y,
+        inst.x_axis.x * vert.position.x + inst.y_axis.x * vert.position.y + inst.translation.x,
+        inst.x_axis.y * vert.position.x + inst.y_axis.y * vert.position.y + inst.translation.y,
     );
     let pos = common__globals.view_matrix * vec4<f32>(world, 0.0, 1.0);
     return VertexOutput(pos, inst.color);
