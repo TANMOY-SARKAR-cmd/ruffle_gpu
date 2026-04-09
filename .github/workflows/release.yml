@@ -18,6 +18,9 @@ jobs:
     name: Auto Tag Version
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.ref_type != 'tag'
+    concurrency:
+      group: auto-tag-main
+      cancel-in-progress: false
     permissions:
       contents: write
 
