@@ -157,66 +157,74 @@ impl FrameMetrics {
                 self.frame_index.saturating_sub(last) >= COOLDOWN_FRAMES
             });
             if warmed_up && cooldown_elapsed {
-                // Both limits share the same EMA signal and follow the same
-                // lerp formula.  They are updated together so the cooldown
-                // window covers both.  Using rect_batch_limit as the shared
-                // "current" value is safe because both limits always move in
-                // lock-step and therefore remain equal.
-                let current = self.rect_batch_limit as f64;
+                // Each per-type limit is computed independently from its own
+                // current value, sharing only the EMA signal and cooldown
+                // window.  The helper encapsulates the lerp formula so the
+                // logic is not duplicated.
+                let new_rect = Self::compute_new_limit(self.rect_batch_limit, self.smoothed_ms);
+                let new_bitmap =
+                    Self::compute_new_limit(self.bitmap_batch_limit, self.smoothed_ms);
 
-                let new_limit = if self.smoothed_ms > PRESSURE_THRESHOLD_MS {
-                    // Under pressure: gradually move toward the minimum limit.
-                    // Uses the standard lerp(a, b, t) = a*(1-t) + b*t
-                    // formulation so that each adjustment closes LERP_STEP_DOWN
-                    // of the remaining gap, giving smooth geometric convergence.
-                    // `floor` ensures we always move strictly toward MIN and
-                    // that the limit can reach MIN_BATCH_LIMIT exactly when the
-                    // gap becomes < 1.0.
-                    let new = current * (1.0 - LERP_STEP_DOWN)
-                        + MIN_BATCH_LIMIT as f64 * LERP_STEP_DOWN;
-                    Some((new.floor() as usize).max(MIN_BATCH_LIMIT))
-                } else if self.smoothed_ms < RELIEF_THRESHOLD_MS
-                    && (self.rect_batch_limit < MAX_BATCH_LIMIT
-                        || self.bitmap_batch_limit < MAX_BATCH_LIMIT)
-                {
-                    // Headroom available: gradually recover toward the maximum.
-                    // Uses the smaller LERP_STEP_UP so recovery is deliberately
-                    // conservative — a fast ramp-up after a pressure event risks
-                    // triggering another reduction immediately (sawtooth).
-                    // `ceil` ensures we always move strictly toward MAX and that
-                    // the limit can reach MAX_BATCH_LIMIT exactly when the
-                    // remaining gap shrinks below 1.0, avoiding an infinite
-                    // near-ceiling stall.
-                    let new =
-                        current * (1.0 - LERP_STEP_UP) + MAX_BATCH_LIMIT as f64 * LERP_STEP_UP;
-                    Some((new.ceil() as usize).min(MAX_BATCH_LIMIT))
-                } else {
-                    None
-                };
-
-                if let Some(limit) = new_limit {
-                    // Apply the computed limit to both per-type limits and
-                    // record the adjustment frame if either actually changed.
-                    let mut adjusted = false;
+                // Apply and track whether either limit actually changed so the
+                // cooldown window is only anchored to real adjustments.
+                let mut adjusted = false;
+                if let Some(limit) = new_rect {
                     if limit != self.rect_batch_limit {
                         self.rect_batch_limit = limit;
                         adjusted = true;
                     }
+                }
+                if let Some(limit) = new_bitmap {
                     if limit != self.bitmap_batch_limit {
                         self.bitmap_batch_limit = limit;
                         adjusted = true;
                     }
-                    if adjusted {
-                        // Record the frame on which the change was made so the
-                        // cooldown window is anchored to actual adjustments.
-                        self.last_adjust_frame = Some(self.frame_index);
-                    }
+                }
+                if adjusted {
+                    // Record the frame on which the change was made so the
+                    // cooldown window is anchored to actual adjustments.
+                    self.last_adjust_frame = Some(self.frame_index);
                 }
             }
         }
 
         self.initialized = true;
         self.frame_index = self.frame_index.saturating_add(1);
+    }
+
+    /// Compute the new adaptive limit for a single batch type given its
+    /// current value and the current smoothed frame time.
+    ///
+    /// Shared by both `rect_batch_limit` and `bitmap_batch_limit` so the
+    /// lerp logic is written exactly once.  Returns `None` if no adjustment
+    /// is needed.
+    fn compute_new_limit(current: usize, smoothed_ms: f64) -> Option<usize> {
+        if smoothed_ms > PRESSURE_THRESHOLD_MS {
+            // Under pressure: gradually move toward the minimum limit.
+            // Uses the standard lerp(a, b, t) = a*(1-t) + b*t
+            // formulation so that each adjustment closes LERP_STEP_DOWN
+            // of the remaining gap, giving smooth geometric convergence.
+            // `floor` ensures we always move strictly toward MIN and
+            // that the limit can reach MIN_BATCH_LIMIT exactly when the
+            // gap becomes < 1.0.
+            let new =
+                current as f64 * (1.0 - LERP_STEP_DOWN) + MIN_BATCH_LIMIT as f64 * LERP_STEP_DOWN;
+            Some((new.floor() as usize).max(MIN_BATCH_LIMIT))
+        } else if smoothed_ms < RELIEF_THRESHOLD_MS && current < MAX_BATCH_LIMIT {
+            // Headroom available: gradually recover toward the maximum.
+            // Uses the smaller LERP_STEP_UP so recovery is deliberately
+            // conservative — a fast ramp-up after a pressure event risks
+            // triggering another reduction immediately (sawtooth).
+            // `ceil` ensures we always move strictly toward MAX and that
+            // the limit can reach MAX_BATCH_LIMIT exactly when the
+            // remaining gap shrinks below 1.0, avoiding an infinite
+            // near-ceiling stall.
+            let new =
+                current as f64 * (1.0 - LERP_STEP_UP) + MAX_BATCH_LIMIT as f64 * LERP_STEP_UP;
+            Some((new.ceil() as usize).min(MAX_BATCH_LIMIT))
+        } else {
+            None
+        }
     }
 
     /// Current batch-size limit for `DrawRectInstanced` batches.
