@@ -597,6 +597,7 @@ fn parse_backend_override(raw: &str) -> Option<wgpu::Backends> {
 }
 
 fn prioritized_backends(backends: wgpu::Backends) -> Vec<wgpu::Backends> {
+
     let mut ordered = Vec::new();
     if backends.contains(wgpu::Backends::VULKAN) {
         ordered.push(wgpu::Backends::VULKAN);
