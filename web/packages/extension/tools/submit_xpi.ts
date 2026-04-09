@@ -51,9 +51,29 @@ async function submit(
     if (!resolvedUnsignedPath.endsWith(".xpi")) {
         throw new Error("Unsigned add-on path must be an .xpi file.");
     }
+    const relUnsignedPath = path.relative(process.cwd(), resolvedUnsignedPath);
+    if (
+        path.isAbsolute(relUnsignedPath) ||
+        relUnsignedPath === ".." ||
+        relUnsignedPath.startsWith(".." + path.sep)
+    ) {
+        throw new Error(
+            "Unsigned add-on path must be within the current working directory.",
+        );
+    }
     const resolvedSourcePath = path.resolve(sourcePath);
     if (!resolvedSourcePath.endsWith(".zip")) {
         throw new Error("Source path must be a .zip file.");
+    }
+    const relSourcePath = path.relative(process.cwd(), resolvedSourcePath);
+    if (
+        path.isAbsolute(relSourcePath) ||
+        relSourcePath === ".." ||
+        relSourcePath.startsWith(".." + path.sep)
+    ) {
+        throw new Error(
+            "Source path must be within the current working directory.",
+        );
     }
     const client = axios.create({
         baseURL: "https://addons.mozilla.org/api/v5/addons/",

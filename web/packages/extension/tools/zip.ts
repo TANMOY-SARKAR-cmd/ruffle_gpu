@@ -9,6 +9,16 @@ async function zip(source: string, destination: string) {
     if (!resolvedDestination.endsWith(".xpi") && !resolvedDestination.endsWith(".zip")) {
         throw new Error("Destination must be an .xpi or .zip file.");
     }
+    const relDestination = path.relative(process.cwd(), resolvedDestination);
+    if (
+        path.isAbsolute(relDestination) ||
+        relDestination === ".." ||
+        relDestination.startsWith(".." + path.sep)
+    ) {
+        throw new Error(
+            "Destination must be within the current working directory.",
+        );
+    }
     await fs.mkdir(path.dirname(resolvedDestination), { recursive: true });
     const output = (await fs.open(resolvedDestination, "w")).createWriteStream();
     const archive = archiver("zip");

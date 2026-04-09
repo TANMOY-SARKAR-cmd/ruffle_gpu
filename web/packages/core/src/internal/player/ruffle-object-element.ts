@@ -216,7 +216,7 @@ export class RuffleObjectElement extends RufflePlayerElement {
                                 url.protocol === "https:" ||
                                 url.protocol === "http:"
                             ) {
-                                elem.setAttribute("data", movieSrc);
+                                elem.setAttribute("data", url.href);
                             }
                         } catch {
                             // Invalid URL - skip setting data attribute

@@ -109,6 +109,16 @@ impl OpenH264Codec {
         const URL_BASE: &str = "http://ciscobinary.openh264.org/";
         const URL_SUFFIX: &str = ".bz2";
 
+        // Validate the directory path to prevent path traversal attacks.
+        if directory
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(
+                "OpenH264 cache directory path must not contain '..' components".into(),
+            );
+        }
+
         let (filename, sha256sum) = (
             openh264_data.download_filename,
             openh264_data.download_sha256,
@@ -213,10 +223,11 @@ impl H264Decoder {
         let openh264 = h264.openh264.clone();
         let mut decoder: *mut ISVCDecoder = ptr::null_mut();
         unsafe {
-            openh264.WelsCreateDecoder(&mut decoder);
+            let ret = openh264.WelsCreateDecoder(&mut decoder);
             assert!(
-                !decoder.is_null(),
-                "OpenH264 WelsCreateDecoder returned a null decoder pointer"
+                ret == 0 && !decoder.is_null(),
+                "OpenH264 WelsCreateDecoder failed (code: {})",
+                ret
             );
 
             let decoder_vtbl = (*decoder)
