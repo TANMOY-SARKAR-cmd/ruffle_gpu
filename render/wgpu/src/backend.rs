@@ -207,19 +207,16 @@ impl FrameMetrics {
     }
 }
 
-// GPU backpressure (secondary signal) — NOT implemented.
+// GPU-side timing is not used as a secondary signal for batch-limit control.
 //
-// The problem statement asks us to incorporate GPU submission-queue timing as a
-// secondary signal when it is measurable.  In this codebase, `wgpu::Queue::submit`
-// returns a `SubmissionIndex` but exposes no queue-depth, fence latency, or GPU
-// timestamp data without the optional `TIMESTAMP_QUERY` / `TIMESTAMP_QUERY_INSIDE_PASSES`
-// device features — neither of which is requested during device creation here.
-// wgpu's `Device::poll` can block until a given `SubmissionIndex` completes, but
-// calling it synchronously inside the render hot-path would stall the CPU and
-// defeat the purpose.  Because no measurable GPU backpressure data is available
-// without additional feature negotiation and a non-trivial instrumentation layer,
-// this secondary signal is intentionally omitted in accordance with the
-// "ONLY if measurable data exists / If not available: SKIP" rule in Step 4.
+// `wgpu::Queue::submit` returns a `SubmissionIndex` but does not expose
+// queue depth, fence latency, or elapsed GPU time.  Obtaining those would
+// require enabling the `TIMESTAMP_QUERY` / `TIMESTAMP_QUERY_INSIDE_PASSES`
+// device features and wiring up a query-set pipeline — neither of which is
+// set up here.  Calling `Device::poll` synchronously in the render hot-path
+// to approximate GPU completion time would stall the CPU thread and negate
+// any benefit.  Wall-clock frame time (the EMA tracked above) is therefore
+// the sole signal used to drive the controller.
 
 /// Creates a wgpu instance with Ruffle's required configuration.
 ///
