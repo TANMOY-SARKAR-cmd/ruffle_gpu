@@ -113,10 +113,16 @@ jobs:
 
             ### Usage
 
-            **Linux / macOS**
+            **Linux**
             ```bash
-            chmod +x ruffle-<platform>-x86_64
-            ./ruffle-<platform>-x86_64 path/to/movie.swf
+            chmod +x ruffle-linux-x86_64
+            ./ruffle-linux-x86_64 path/to/movie.swf
+            ```
+
+            **macOS**
+            ```bash
+            chmod +x ruffle-macos-x86_64
+            ./ruffle-macos-x86_64 path/to/movie.swf
             ```
 
             **Windows**
