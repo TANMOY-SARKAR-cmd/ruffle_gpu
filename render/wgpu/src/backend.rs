@@ -72,8 +72,10 @@ const STEP_FACTOR: f64 = 0.75;
 /// * ActionScript execution is not touched.
 /// * No frames are skipped or merged.
 struct FrameMetrics {
-    /// Wall-clock timestamp captured at the start of the previous frame.
-    last_frame_start: Option<Instant>,
+    /// Whether at least one frame has been measured.  Used to suppress the EMA
+    /// update on the very first call to `end_frame`, when there is no prior
+    /// sample to incorporate.
+    initialized: bool,
     /// Exponential moving average of frame duration in milliseconds.
     smoothed_ms: f64,
     /// Current adaptive batch limit (shared for both rect and bitmap batches).
@@ -83,7 +85,7 @@ struct FrameMetrics {
 impl FrameMetrics {
     fn new() -> Self {
         Self {
-            last_frame_start: None,
+            initialized: false,
             smoothed_ms: 16.67, // start assuming 60 FPS
             batch_limit: MAX_BATCH_LIMIT,
         }
@@ -100,7 +102,7 @@ impl FrameMetrics {
     fn end_frame(&mut self, started_at: Instant) {
         let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
 
-        if self.last_frame_start.is_some() {
+        if self.initialized {
             // Update EMA.
             self.smoothed_ms =
                 EMA_ALPHA * elapsed_ms + (1.0 - EMA_ALPHA) * self.smoothed_ms;
@@ -120,7 +122,7 @@ impl FrameMetrics {
             }
         }
 
-        self.last_frame_start = Some(started_at);
+        self.initialized = true;
     }
 
     /// Current batch-size limit to use for both rect and bitmap instanced
