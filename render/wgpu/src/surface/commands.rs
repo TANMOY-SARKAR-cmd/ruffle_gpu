@@ -23,16 +23,6 @@ use wgpu::util::DeviceExt;
 
 use super::target::PoolOrArcTexture;
 
-/// Maximum number of rectangles accumulated in a single `DrawRectInstanced`
-/// batch before it is automatically flushed.  Each rect occupies one
-/// `RectInstance` (40 bytes), so 16 384 rects ≈ 640 KiB.
-const MAX_BATCH_RECTS: usize = 16_384;
-
-/// Maximum number of bitmaps accumulated in a single `DrawBitmapInstanced`
-/// batch before it is automatically flushed.  Each bitmap occupies one
-/// `BitmapInstance` (56 bytes), so 16 384 bitmaps ≈ 896 KiB.
-const MAX_BATCH_BITMAPS: usize = 16_384;
-
 /// Normalise a [`swf::Color`] to premultiplied linear RGBA in `[0.0, 1.0]`.
 #[inline]
 fn color_to_premult_rgba(c: Color) -> [f32; 4] {
@@ -882,6 +872,7 @@ pub fn chunk_blends<'a>(
     height: u32,
     nearest_layer: LayerRef,
     texture_pool: &mut TexturePool,
+    batch_limit: usize,
 ) -> Vec<Chunk> {
     WgpuCommandHandler::new(
         descriptors,
@@ -894,6 +885,7 @@ pub fn chunk_blends<'a>(
         height,
         nearest_layer,
         texture_pool,
+        batch_limit,
     )
     .chunk_blends(commands)
 }
@@ -918,6 +910,12 @@ struct WgpuCommandHandler<'a> {
     needs_stencil: bool,
     num_masks: i32,
 
+    /// Adaptive batch size limit.  Controls the maximum number of instances
+    /// packed into a single `DrawRectInstanced` or `DrawBitmapInstanced` call
+    /// before an automatic flush.  Derived from `FrameMetrics`; does **not**
+    /// affect which commands are issued or the final rendered image.
+    batch_limit: usize,
+
     /// Accumulated per-rect instance data for the in-progress instanced batch.
     rect_instances: Vec<RectInstance>,
 
@@ -941,6 +939,7 @@ impl<'a> WgpuCommandHandler<'a> {
         height: u32,
         nearest_layer: LayerRef<'a>,
         texture_pool: &'a mut TexturePool,
+        batch_limit: usize,
     ) -> Self {
         let transforms = Self::new_transforms(descriptors, dynamic_transforms);
 
@@ -968,6 +967,8 @@ impl<'a> WgpuCommandHandler<'a> {
             last_transform: None,
             needs_stencil: false,
             num_masks: 0,
+
+            batch_limit,
 
             rect_instances: Vec::new(),
 
@@ -1179,6 +1180,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.draw_encoder,
             target_layer,
             self.texture_pool,
+            self.batch_limit,
         );
         target.ensure_cleared(self.draw_encoder);
 
@@ -1301,7 +1303,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         });
 
         // Flush when the batch reaches the size limit.
-        if self.bitmap_instances.len() >= MAX_BATCH_BITMAPS {
+        if self.bitmap_instances.len() >= self.batch_limit {
             self.flush_bitmap_batch();
         }
     }
@@ -1357,7 +1359,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         });
 
         // Flush when the batch reaches the size limit.
-        if self.rect_instances.len() >= MAX_BATCH_RECTS {
+        if self.rect_instances.len() >= self.batch_limit {
             self.flush_rect_batch();
         }
     }
@@ -1449,6 +1451,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.draw_encoder,
             LayerRef::None,
             self.texture_pool,
+            self.batch_limit,
         );
         maskee.ensure_cleared(self.draw_encoder);
         let matrix = Matrix::scale(maskee.width() as f32, maskee.height() as f32);
@@ -1464,6 +1467,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.draw_encoder,
             LayerRef::None,
             self.texture_pool,
+            self.batch_limit,
         );
         mask.ensure_cleared(self.draw_encoder);
         let mask = mask.take_color_texture();
