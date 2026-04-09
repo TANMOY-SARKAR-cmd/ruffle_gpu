@@ -1,0 +1,60 @@
+name: Auto Tag
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  auto_tag:
+    name: Auto Tag Version
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.ref_type != 'tag'
+    concurrency:
+      group: auto-tag-main
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch --tags
+
+      - name: Create and push new version tag
+        run: |
+          # Select the highest semver tag (vMAJOR.MINOR.PATCH with numeric components only)
+          LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -1)
+          if [ -z "$LATEST" ]; then
+            NEW="v0.1.0"
+          else
+            VERSION="${LATEST#v}"
+            MAJOR=$(echo "$VERSION" | cut -d. -f1)
+            MINOR=$(echo "$VERSION" | cut -d. -f2)
+            PATCH=$(echo "$VERSION" | cut -d. -f3)
+            if ! [[ "$MAJOR" =~ ^[0-9]+$ && "$MINOR" =~ ^[0-9]+$ && "$PATCH" =~ ^[0-9]+$ ]]; then
+              echo "ERROR: tag '$LATEST' components are not all numeric; aborting" >&2
+              exit 1
+            fi
+            NEW="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          echo "Latest tag: $LATEST"
+          echo "New tag: $NEW"
+          if git rev-parse "$NEW" >/dev/null 2>&1; then
+            echo "Tag $NEW already exists, skipping"
+            exit 0
+          fi
+          git tag "$NEW"
+          git push https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }} "$NEW" || {
+            echo "Push failed (likely race condition), skipping"
+            exit 0
+          }
