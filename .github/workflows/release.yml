@@ -35,7 +35,10 @@ jobs:
 
       - name: Create and push new version tag
         run: |
-          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          # Select the highest semver tag (vMAJOR.MINOR.PATCH with numeric components only)
+          LATEST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -1)
           if [ -z "$LATEST" ]; then
             NEW="v0.1.0"
           else
@@ -43,6 +46,10 @@ jobs:
             MAJOR=$(echo "$VERSION" | cut -d. -f1)
             MINOR=$(echo "$VERSION" | cut -d. -f2)
             PATCH=$(echo "$VERSION" | cut -d. -f3)
+            if ! [[ "$MAJOR" =~ ^[0-9]+$ && "$MINOR" =~ ^[0-9]+$ && "$PATCH" =~ ^[0-9]+$ ]]; then
+              echo "ERROR: tag '$LATEST' components are not all numeric; aborting" >&2
+              exit 1
+            fi
             NEW="v${MAJOR}.${MINOR}.$((PATCH + 1))"
           fi
           git config user.name "github-actions"
@@ -53,6 +60,9 @@ jobs:
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Only build when triggered by a version tag; auto_tag pushes one on each
+    # merge to main, which re-triggers this workflow via the tags: "v*" filter.
+    if: github.ref_type == 'tag'
     permissions:
       contents: read
     strategy:
