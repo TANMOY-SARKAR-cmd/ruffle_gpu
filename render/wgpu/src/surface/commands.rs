@@ -7,7 +7,7 @@ use crate::dynamic_transforms::DynamicTransforms;
 use crate::mesh::{DrawType, Mesh, as_mesh};
 use crate::surface::Surface;
 use crate::surface::target::CommandTarget;
-use crate::{Descriptors, MaskState, Pipelines, Transforms, as_texture};
+use crate::{Descriptors, MaskState, PosColorVertex, Pipelines, Transforms, as_texture};
 use ruffle_render::backend::ShapeHandle;
 use ruffle_render::bitmap::{BitmapHandle, PixelSnapping};
 use ruffle_render::commands::{CommandHandler, CommandList, RenderBlendMode};
@@ -19,8 +19,28 @@ use ruffle_render::transform::Transform;
 use std::mem;
 use swf::{BlendMode, Color, ColorTransform, Twips};
 use wgpu::Backend;
+use wgpu::util::DeviceExt;
 
 use super::target::PoolOrArcTexture;
+
+/// Maximum number of rectangles accumulated in a single `DrawRectBatch`
+/// before it is automatically flushed.  Each rect occupies 4 vertices
+/// (≈ 96 bytes) and 6 indices (24 bytes), so 16 384 rects ≈ 1.5 MiB.
+const MAX_BATCH_RECTS: usize = 16_384;
+
+/// Index offsets for the two triangles that make up one quad.
+/// Applied as `base + QUAD_INDICES[i]` when building index buffers.
+const QUAD_INDICES: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+/// Normalise a [`swf::Color`] to premultiplied linear RGBA in `[0.0, 1.0]`.
+#[inline]
+fn color_to_premult_rgba(c: Color) -> [f32; 4] {
+    let r = f32::from(c.r) / 255.0;
+    let g = f32::from(c.g) / 255.0;
+    let b = f32::from(c.b) / 255.0;
+    let a = f32::from(c.a) / 255.0;
+    [r * a, g * a, b * a, a]
+}
 
 pub struct CommandRenderer<'pass, 'frame: 'pass, 'global: 'frame> {
     pipelines: &'frame Pipelines,
@@ -183,6 +203,11 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             DrawCommand::DrawLineRect { transform_buffer } => {
                 self.draw_lines::<true>(*transform_buffer)
             }
+            DrawCommand::DrawRectBatch {
+                vertices,
+                indices,
+                num_indices,
+            } => self.draw_rect_batched(vertices, indices, *num_indices),
             DrawCommand::PushMask => self.push_mask(),
             DrawCommand::ActivateMask => self.activate_mask(),
             DrawCommand::DeactivateMask => self.deactivate_mask(),
@@ -421,6 +446,45 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         }
     }
 
+    /// Select the batched-color pipeline, which uses world-space vertex data
+    /// and therefore needs only the global bind group (group 0).
+    pub fn prep_batched_color(&mut self) {
+        if self.needs_stencil {
+            self.set_pipeline_cached(
+                self.pipelines.batched_color.pipeline_for(self.mask_state),
+            );
+        } else {
+            self.set_pipeline_cached(self.pipelines.batched_color.stencilless_pipeline());
+        }
+    }
+
+    /// Draw a batch of pre-transformed colored rectangles in a single call.
+    /// `vertices` and `indices` contain world-space `PosColorVertex` data;
+    /// no per-object transform uniform (group 1) is required.
+    pub fn draw_rect_batched(
+        &mut self,
+        vertices: &'pass wgpu::Buffer,
+        indices: &'pass wgpu::Buffer,
+        num_indices: u32,
+    ) {
+        if cfg!(feature = "render_debug_labels") {
+            self.render_pass.push_debug_group("draw_rect_batch");
+        }
+        self.prep_batched_color();
+        // The batched pipeline layout only declares group(0) globals.
+        // Do NOT call set_transform_bind_group here.
+        self.render_pass.set_vertex_buffer(0, vertices.slice(..));
+        self.render_pass
+            .set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+        self.render_pass.draw_indexed(0..num_indices, 0, 0..1);
+        // Invalidate the buffer cache so the next draw correctly re-binds.
+        self.current_vertex_buffer = None;
+        self.current_index_buffer = None;
+        if cfg!(feature = "render_debug_labels") {
+            self.render_pass.pop_debug_group();
+        }
+    }
+
     pub fn draw_lines<const RECT: bool>(&mut self, transform_buffer: wgpu::DynamicOffset) {
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.push_debug_group("draw_lines");
@@ -521,13 +585,25 @@ pub enum DrawCommand {
         shape: ShapeHandle,
         transform_buffer: wgpu::DynamicOffset,
     },
-    DrawRect {
-        transform_buffer: wgpu::DynamicOffset,
-    },
     DrawLine {
         transform_buffer: wgpu::DynamicOffset,
     },
     DrawLineRect {
+        transform_buffer: wgpu::DynamicOffset,
+    },
+    /// A batch of pre-transformed colored rectangles rendered in a single
+    /// draw call.  World-space vertex positions and premultiplied RGBA colors
+    /// are stored directly in `vertices`; no per-object transform uniform is
+    /// needed.
+    DrawRectBatch {
+        vertices: wgpu::Buffer,
+        indices: wgpu::Buffer,
+        num_indices: u32,
+    },
+    /// Single pre-transformed colored rectangle (legacy path, kept as a safe
+    /// fallback; not currently generated but matched in `execute`).
+    #[allow(dead_code)]
+    DrawRect {
         transform_buffer: wgpu::DynamicOffset,
     },
     PushMask,
@@ -593,6 +669,11 @@ struct WgpuCommandHandler<'a> {
     last_transform: Option<(Transforms, wgpu::DynamicOffset)>,
     needs_stencil: bool,
     num_masks: i32,
+
+    /// Accumulated world-space vertices for the in-progress rect batch.
+    rect_batch_vertices: Vec<PosColorVertex>,
+    /// Accumulated triangle indices for the in-progress rect batch.
+    rect_batch_indices: Vec<u32>,
 }
 
 impl<'a> WgpuCommandHandler<'a> {
@@ -635,6 +716,9 @@ impl<'a> WgpuCommandHandler<'a> {
             last_transform: None,
             needs_stencil: false,
             num_masks: 0,
+
+            rect_batch_vertices: Vec::new(),
+            rect_batch_indices: Vec::new(),
         }
     }
 
@@ -647,10 +731,51 @@ impl<'a> WgpuCommandHandler<'a> {
         transforms
     }
 
+    /// Flush the accumulated rect batch (if any) as a single `DrawRectBatch`
+    /// command in `self.current`.  Clears the batch accumulators.
+    ///
+    /// Call this before emitting any command that is not a `DrawRect` so that
+    /// ordering between batched rects and other draw calls is preserved.
+    fn flush_rect_batch(&mut self) {
+        if self.rect_batch_vertices.is_empty() {
+            return;
+        }
+
+        let vertices = self
+            .descriptors
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: create_debug_label!("Rect batch vertex buffer").as_deref(),
+                contents: bytemuck::cast_slice(&self.rect_batch_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let num_indices = self.rect_batch_indices.len() as u32;
+        let indices = self
+            .descriptors
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: create_debug_label!("Rect batch index buffer").as_deref(),
+                contents: bytemuck::cast_slice(&self.rect_batch_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+        self.rect_batch_vertices.clear();
+        self.rect_batch_indices.clear();
+
+        self.current.push(DrawCommand::DrawRectBatch {
+            vertices,
+            indices,
+            num_indices,
+        });
+    }
+
     /// Replaces every blend with a RenderBitmap, with the subcommands rendered out to a temporary texture
     /// Every complex blend will be its own item, but every other draw will be chunked together
     fn chunk_blends(&mut self, commands: CommandList) -> Vec<Chunk> {
         commands.execute(self);
+
+        // Flush any remaining rect batch before finalising the chunk.
+        self.flush_rect_batch();
 
         let current = mem::take(&mut self.current);
         let mut result = mem::take(&mut self.result);
@@ -725,6 +850,9 @@ impl<'a> WgpuCommandHandler<'a> {
 
 impl CommandHandler for WgpuCommandHandler<'_> {
     fn blend(&mut self, commands: CommandList, blend_mode: RenderBlendMode) {
+        // Preserve draw order: flush any pending rect batch first.
+        self.flush_rect_batch();
+
         let mut surface = Surface::new(
             self.descriptors,
             self.quality,
@@ -834,6 +962,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         smoothing: bool,
         pixel_snapping: PixelSnapping,
     ) {
+        self.flush_rect_batch();
         let mut matrix = transform.matrix;
         {
             let texture = as_texture(&bitmap);
@@ -854,6 +983,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         });
     }
     fn render_stage3d(&mut self, bitmap: BitmapHandle, transform: Transform) {
+        self.flush_rect_batch();
         let mut matrix = transform.matrix;
         {
             let texture = as_texture(&bitmap);
@@ -874,6 +1004,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
     }
 
     fn render_shape(&mut self, shape: ShapeHandle, transform: Transform) {
+        self.flush_rect_batch();
         self.add_to_current(
             transform.matrix,
             transform.color_transform,
@@ -885,14 +1016,52 @@ impl CommandHandler for WgpuCommandHandler<'_> {
     }
 
     fn draw_rect(&mut self, color: Color, matrix: Matrix) {
-        self.add_to_current(
-            matrix,
-            ColorTransform::multiply_from(color),
-            |transform_buffer| DrawCommand::DrawRect { transform_buffer },
-        );
+        // Pre-transform the quad vertices to world space and pre-compute the
+        // premultiplied RGBA color on the CPU so that multiple consecutive
+        // draw_rect calls can be merged into a single GPU draw call.
+        let premult = color_to_premult_rgba(color);
+
+        // World-space positions of the four quad corners.
+        // Quad in object space: [0,0], [1,0], [1,1], [0,1]
+        // Transformed: pos = world_matrix * [x, y, 0, 1]
+        //   result.x = a*x + c*y + tx
+        //   result.y = b*x + d*y + ty
+        let tx = matrix.tx.to_pixels() as f32;
+        let ty = matrix.ty.to_pixels() as f32;
+        let ma = matrix.a;
+        let mb = matrix.b;
+        let mc = matrix.c;
+        let md = matrix.d;
+
+        let base = self.rect_batch_vertices.len() as u32;
+        self.rect_batch_vertices.push(PosColorVertex {
+            position: [tx, ty],
+            color: premult,
+        });
+        self.rect_batch_vertices.push(PosColorVertex {
+            position: [ma + tx, mb + ty],
+            color: premult,
+        });
+        self.rect_batch_vertices.push(PosColorVertex {
+            position: [ma + mc + tx, mb + md + ty],
+            color: premult,
+        });
+        self.rect_batch_vertices.push(PosColorVertex {
+            position: [mc + tx, md + ty],
+            color: premult,
+        });
+        // Two clockwise triangles per quad, using the shared index template.
+        self.rect_batch_indices
+            .extend(QUAD_INDICES.iter().map(|&i| base + i));
+
+        // Flush when the batch reaches the size limit.
+        if self.rect_batch_vertices.len() >= MAX_BATCH_RECTS * 4 {
+            self.flush_rect_batch();
+        }
     }
 
     fn draw_line(&mut self, color: Color, mut matrix: Matrix) {
+        self.flush_rect_batch();
         if self.emulate_lines {
             let mut cl = CommandList::new();
             emulate_line(&mut cl, color, matrix);
@@ -909,6 +1078,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
     }
 
     fn draw_line_rect(&mut self, color: Color, mut matrix: Matrix) {
+        self.flush_rect_batch();
         if self.emulate_lines {
             let mut cl = CommandList::new();
             emulate_line_rect(&mut cl, color, matrix);
@@ -925,28 +1095,33 @@ impl CommandHandler for WgpuCommandHandler<'_> {
     }
 
     fn push_mask(&mut self) {
+        self.flush_rect_batch();
         self.needs_stencil = true;
         self.num_masks += 1;
         self.current.push(DrawCommand::PushMask);
     }
 
     fn activate_mask(&mut self) {
+        self.flush_rect_batch();
         self.needs_stencil = true;
         self.current.push(DrawCommand::ActivateMask);
     }
 
     fn deactivate_mask(&mut self) {
+        self.flush_rect_batch();
         self.needs_stencil = true;
         self.current.push(DrawCommand::DeactivateMask);
     }
 
     fn pop_mask(&mut self) {
+        self.flush_rect_batch();
         self.needs_stencil = true;
         self.num_masks -= 1;
         self.current.push(DrawCommand::PopMask);
     }
 
     fn render_alpha_mask(&mut self, maskee_commands: CommandList, mask_commands: CommandList) {
+        self.flush_rect_batch();
         let mut surface = Surface::new(
             self.descriptors,
             self.quality,
