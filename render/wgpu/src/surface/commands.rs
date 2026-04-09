@@ -758,22 +758,24 @@ pub enum LayerRef<'a> {
 /// batch commands into a single GPU-backed draw call, then materialise the
 /// GPU `wgpu::Buffer` for each merged batch exactly once.
 ///
-/// **Safe merges (bounded by `batch_limit`):**
+/// **Safe merges:**
 /// * Consecutive `PendingRectBatch` commands — same pipeline, no per-batch
 ///   GPU state; their instance data can be concatenated while preserving order.
+///   Merges stop once the combined instance count would exceed `rect_batch_limit`.
 /// * Consecutive `PendingBitmapBatch` commands that share the same
 ///   `(bitmap, smoothing, blend_mode)` key — same texture and pipeline.
+///   Merges stop once the combined instance count would exceed `bitmap_batch_limit`.
 ///
-/// Both kinds of merge stop as soon as adding the next pending batch would
-/// push the combined `num_instances` above `batch_limit`, ensuring the
-/// adaptive flush threshold is respected end-to-end.
+/// Both limits come from the per-type adaptive values in `FrameMetrics`,
+/// ensuring the flush threshold is respected end-to-end.
 ///
 /// GPU buffers are created **once per final merged run**, eliminating the
 /// quadratic reallocation of the old pairwise approach.
 fn optimize_draw_commands(
     commands: Vec<DrawCommand>,
     device: &wgpu::Device,
-    batch_limit: usize,
+    rect_batch_limit: usize,
+    bitmap_batch_limit: usize,
 ) -> Vec<DrawCommand> {
     // ── helpers ───────────────────────────────────────────────────────────
     fn emit_rect_run(
@@ -837,13 +839,13 @@ fn optimize_draw_commands(
                 // If adding new_rects would exceed the limit, flush the
                 // current rect run first.
                 if !rect_run.is_empty()
-                    && rect_run.len() + new_rects.len() > batch_limit
+                    && rect_run.len() + new_rects.len() > rect_batch_limit
                 {
                     emit_rect_run(&mut rect_run, &mut out, device);
                 }
                 rect_run.append(&mut new_rects);
                 // Emit immediately if we hit the cap exactly.
-                if rect_run.len() >= batch_limit {
+                if rect_run.len() >= rect_batch_limit {
                     emit_rect_run(&mut rect_run, &mut out, device);
                 }
             }
@@ -872,14 +874,14 @@ fn optimize_draw_commands(
                 } else {
                     // Same key: try to extend the current run.
                     let (_, _, _, pending) = bitmap_run.as_mut().unwrap();
-                    if !pending.is_empty() && pending.len() + bitmaps.len() > batch_limit {
+                    if !pending.is_empty() && pending.len() + bitmaps.len() > bitmap_batch_limit {
                         // Would exceed the limit: emit the current run and
                         // start a new one with this batch.
                         emit_bitmap_run(&mut bitmap_run, &mut out, device);
                         bitmap_run = Some((bitmap, smoothing, blend_mode, bitmaps));
                     } else {
                         pending.append(&mut bitmaps);
-                        if pending.len() >= batch_limit {
+                        if pending.len() >= bitmap_batch_limit {
                             emit_bitmap_run(&mut bitmap_run, &mut out, device);
                         }
                     }
@@ -917,7 +919,8 @@ pub fn chunk_blends<'a>(
     height: u32,
     nearest_layer: LayerRef,
     texture_pool: &mut TexturePool,
-    batch_limit: usize,
+    rect_batch_limit: usize,
+    bitmap_batch_limit: usize,
 ) -> Vec<Chunk> {
     WgpuCommandHandler::new(
         descriptors,
@@ -930,7 +933,8 @@ pub fn chunk_blends<'a>(
         height,
         nearest_layer,
         texture_pool,
-        batch_limit,
+        rect_batch_limit,
+        bitmap_batch_limit,
     )
     .chunk_blends(commands)
 }
@@ -955,11 +959,17 @@ struct WgpuCommandHandler<'a> {
     needs_stencil: bool,
     num_masks: i32,
 
-    /// Adaptive batch size limit.  Controls the maximum number of instances
-    /// packed into a single `DrawRectInstanced` or `DrawBitmapInstanced` call
-    /// before an automatic flush.  Derived from `FrameMetrics`; does **not**
-    /// affect which commands are issued or the final rendered image.
-    batch_limit: usize,
+    /// Adaptive batch size limit for `DrawRectInstanced` calls.
+    /// Controls the maximum number of rect instances packed into a single
+    /// draw call before an automatic flush.  Derived from `FrameMetrics`;
+    /// does **not** affect which commands are issued or the final rendered image.
+    rect_batch_limit: usize,
+
+    /// Adaptive batch size limit for `DrawBitmapInstanced` calls.
+    /// Controls the maximum number of bitmap instances packed into a single
+    /// draw call before an automatic flush.  Derived from `FrameMetrics`;
+    /// does **not** affect which commands are issued or the final rendered image.
+    bitmap_batch_limit: usize,
 
     /// Accumulated per-rect instance data for the in-progress instanced batch.
     rect_instances: Vec<RectInstance>,
@@ -984,7 +994,8 @@ impl<'a> WgpuCommandHandler<'a> {
         height: u32,
         nearest_layer: LayerRef<'a>,
         texture_pool: &'a mut TexturePool,
-        batch_limit: usize,
+        rect_batch_limit: usize,
+        bitmap_batch_limit: usize,
     ) -> Self {
         let transforms = Self::new_transforms(descriptors, dynamic_transforms);
 
@@ -1013,7 +1024,8 @@ impl<'a> WgpuCommandHandler<'a> {
             needs_stencil: false,
             num_masks: 0,
 
-            batch_limit,
+            rect_batch_limit,
+            bitmap_batch_limit,
 
             rect_instances: Vec::new(),
 
@@ -1089,7 +1101,8 @@ impl<'a> WgpuCommandHandler<'a> {
             let cmds = optimize_draw_commands(
                 mem::take(&mut self.current),
                 &self.descriptors.device,
-                self.batch_limit,
+                self.rect_batch_limit,
+                self.bitmap_batch_limit,
             );
             self.result.push(Chunk::Draw(cmds, needs_stencil, transforms));
         }
@@ -1109,7 +1122,8 @@ impl<'a> WgpuCommandHandler<'a> {
         let cmds = optimize_draw_commands(
             mem::take(&mut self.current),
             &self.descriptors.device,
-            self.batch_limit,
+            self.rect_batch_limit,
+            self.bitmap_batch_limit,
         );
         self.result
             .push(Chunk::Draw(cmds, self.needs_stencil, transforms));
@@ -1198,7 +1212,8 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.draw_encoder,
             target_layer,
             self.texture_pool,
-            self.batch_limit,
+            self.rect_batch_limit,
+            self.bitmap_batch_limit,
         );
         target.ensure_cleared(self.draw_encoder);
 
@@ -1321,7 +1336,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         });
 
         // Flush when the batch reaches the size limit.
-        if self.bitmap_instances.len() >= self.batch_limit {
+        if self.bitmap_instances.len() >= self.bitmap_batch_limit {
             self.flush_bitmap_batch();
         }
     }
@@ -1377,7 +1392,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         });
 
         // Flush when the batch reaches the size limit.
-        if self.rect_instances.len() >= self.batch_limit {
+        if self.rect_instances.len() >= self.rect_batch_limit {
             self.flush_rect_batch();
         }
     }
@@ -1469,7 +1484,8 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.draw_encoder,
             LayerRef::None,
             self.texture_pool,
-            self.batch_limit,
+            self.rect_batch_limit,
+            self.bitmap_batch_limit,
         );
         maskee.ensure_cleared(self.draw_encoder);
         let matrix = Matrix::scale(maskee.width() as f32, maskee.height() as f32);
@@ -1485,7 +1501,8 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.draw_encoder,
             LayerRef::None,
             self.texture_pool,
-            self.batch_limit,
+            self.rect_batch_limit,
+            self.bitmap_batch_limit,
         );
         mask.ensure_cleared(self.draw_encoder);
         let mask = mask.take_color_texture();
