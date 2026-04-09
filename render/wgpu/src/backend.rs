@@ -89,9 +89,10 @@ struct FrameMetrics {
     batch_limit: usize,
     /// Monotonically increasing count of frames measured so far.
     frame_index: u64,
-    /// Value of `frame_index` when `batch_limit` was last changed.  Used to
-    /// enforce the inter-adjustment cooldown.
-    last_adjust_frame: u64,
+    /// Frame index at which `batch_limit` was last changed, or `None` if no
+    /// adjustment has been made yet.  `None` bypasses the cooldown so that the
+    /// very first pressure signal is acted on without delay.
+    last_adjust_frame: Option<u64>,
 }
 
 impl FrameMetrics {
@@ -101,7 +102,7 @@ impl FrameMetrics {
             smoothed_ms: 16.67, // start assuming 60 FPS
             batch_limit: MAX_BATCH_LIMIT,
             frame_index: 0,
-            last_adjust_frame: 0,
+            last_adjust_frame: None,
         }
     }
 
@@ -124,21 +125,27 @@ impl FrameMetrics {
             // Cooldown gate: only attempt an adjustment once per COOLDOWN_FRAMES
             // frames.  This prevents the controller from toggling every frame
             // when smoothed_ms hovers near a threshold, eliminating oscillation.
-            if self.frame_index.saturating_sub(self.last_adjust_frame) >= COOLDOWN_FRAMES {
+            // `last_adjust_frame = None` means no adjustment has ever been made,
+            // so the first pressure signal is acted on immediately.
+            let cooldown_elapsed = self.last_adjust_frame.map_or(true, |last| {
+                self.frame_index.saturating_sub(last) >= COOLDOWN_FRAMES
+            });
+            if cooldown_elapsed {
                 let current = self.batch_limit as f64;
 
                 let new_limit = if self.smoothed_ms > PRESSURE_THRESHOLD_MS {
                     // Under pressure: gradually move toward the minimum limit
-                    // rather than jumping by a fixed multiplier.  Closing 20%
-                    // of the remaining gap each adjustment keeps reductions
-                    // proportional and avoids abrupt throughput drops.
-                    let new = current + (MIN_BATCH_LIMIT as f64 - current) * LERP_STEP;
+                    // rather than jumping by a fixed multiplier.  Uses the
+                    // standard lerp(a, b, t) = a*(1-t) + b*t formulation so
+                    // that each adjustment closes LERP_STEP of the remaining
+                    // gap, giving smooth geometric convergence.
+                    let new = current * (1.0 - LERP_STEP) + MIN_BATCH_LIMIT as f64 * LERP_STEP;
                     Some((new as usize).max(MIN_BATCH_LIMIT))
                 } else if self.smoothed_ms < RELIEF_THRESHOLD_MS
                     && self.batch_limit < MAX_BATCH_LIMIT
                 {
                     // Headroom available: gradually recover toward the maximum.
-                    let new = current + (MAX_BATCH_LIMIT as f64 - current) * LERP_STEP;
+                    let new = current * (1.0 - LERP_STEP) + MAX_BATCH_LIMIT as f64 * LERP_STEP;
                     Some((new as usize).min(MAX_BATCH_LIMIT))
                 } else {
                     None
@@ -149,7 +156,7 @@ impl FrameMetrics {
                         self.batch_limit = limit;
                         // Record the frame on which the change was made so the
                         // cooldown window is anchored to actual adjustments.
-                        self.last_adjust_frame = self.frame_index;
+                        self.last_adjust_frame = Some(self.frame_index);
                     }
                 }
             }
