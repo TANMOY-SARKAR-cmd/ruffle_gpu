@@ -15,6 +15,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: write
+      actions: write
 
     steps:
       - name: Checkout repository
@@ -53,7 +54,7 @@ jobs:
             exit 0
           fi
           git tag "$NEW"
-          git push origin "$NEW" || {
+          git push https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }} "$NEW" || {
             echo "Push failed (likely race condition), skipping"
             exit 0
           }
