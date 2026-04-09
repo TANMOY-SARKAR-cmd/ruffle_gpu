@@ -51,7 +51,12 @@ async function submit(
     if (!resolvedUnsignedPath.endsWith(".xpi")) {
         throw new Error("Unsigned add-on path must be an .xpi file.");
     }
-    if (path.relative(process.cwd(), resolvedUnsignedPath).startsWith("..")) {
+    const relUnsignedPath = path.relative(process.cwd(), resolvedUnsignedPath);
+    if (
+        path.isAbsolute(relUnsignedPath) ||
+        relUnsignedPath === ".." ||
+        relUnsignedPath.startsWith(".." + path.sep)
+    ) {
         throw new Error(
             "Unsigned add-on path must be within the current working directory.",
         );
@@ -60,7 +65,12 @@ async function submit(
     if (!resolvedSourcePath.endsWith(".zip")) {
         throw new Error("Source path must be a .zip file.");
     }
-    if (path.relative(process.cwd(), resolvedSourcePath).startsWith("..")) {
+    const relSourcePath = path.relative(process.cwd(), resolvedSourcePath);
+    if (
+        path.isAbsolute(relSourcePath) ||
+        relSourcePath === ".." ||
+        relSourcePath.startsWith(".." + path.sep)
+    ) {
         throw new Error(
             "Source path must be within the current working directory.",
         );

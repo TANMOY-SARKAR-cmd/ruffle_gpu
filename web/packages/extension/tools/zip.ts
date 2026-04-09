@@ -9,7 +9,12 @@ async function zip(source: string, destination: string) {
     if (!resolvedDestination.endsWith(".xpi") && !resolvedDestination.endsWith(".zip")) {
         throw new Error("Destination must be an .xpi or .zip file.");
     }
-    if (path.relative(process.cwd(), resolvedDestination).startsWith("..")) {
+    const relDestination = path.relative(process.cwd(), resolvedDestination);
+    if (
+        path.isAbsolute(relDestination) ||
+        relDestination === ".." ||
+        relDestination.startsWith(".." + path.sep)
+    ) {
         throw new Error(
             "Destination must be within the current working directory.",
         );
