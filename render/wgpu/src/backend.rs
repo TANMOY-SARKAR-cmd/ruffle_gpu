@@ -86,12 +86,12 @@ const WARMUP_FRAMES: u64 = 8;
 /// Lightweight adaptive performance tracker.
 ///
 /// Measures wall-clock time between consecutive `submit_frame` calls, maintains
-/// a smoothed (EMA) frame time, and derives a `batch_limit` that is used in
-/// place of the hard-coded `MAX_BATCH_RECTS` / `MAX_BATCH_BITMAPS` constants.
+/// a smoothed (EMA) frame time, and derives per-type batch limits that are used
+/// in place of the hard-coded `MAX_BATCH_RECTS` / `MAX_BATCH_BITMAPS` constants.
 ///
 /// # Safety guarantees
-/// * The batch limit only changes *how many* instances are packed into a single
-///   GPU draw call before an automatic flush; it never changes *which* commands
+/// * The batch limits only change *how many* instances are packed into a single
+///   GPU draw call before an automatic flush; they never change *which* commands
 ///   are issued or *when* a frame is presented.
 /// * ActionScript execution is not touched.
 /// * No frames are skipped or merged.
@@ -102,13 +102,15 @@ struct FrameMetrics {
     initialized: bool,
     /// Exponential moving average of frame duration in milliseconds.
     smoothed_ms: f64,
-    /// Current adaptive batch limit (shared for both rect and bitmap batches).
-    batch_limit: usize,
+    /// Current adaptive batch limit for `DrawRectInstanced` batches.
+    rect_batch_limit: usize,
+    /// Current adaptive batch limit for `DrawBitmapInstanced` batches.
+    bitmap_batch_limit: usize,
     /// Monotonically increasing count of frames measured so far.
     frame_index: u64,
-    /// Frame index at which `batch_limit` was last changed, or `None` if no
-    /// adjustment has been made yet.  `None` bypasses the cooldown so that the
-    /// very first pressure signal is acted on without delay.
+    /// Frame index at which either batch limit was last changed, or `None` if
+    /// no adjustment has been made yet.  `None` bypasses the cooldown so that
+    /// the very first pressure signal is acted on without delay.
     last_adjust_frame: Option<u64>,
 }
 
@@ -117,7 +119,8 @@ impl FrameMetrics {
         Self {
             initialized: false,
             smoothed_ms: 16.67, // start assuming 60 FPS
-            batch_limit: MAX_BATCH_LIMIT,
+            rect_batch_limit: MAX_BATCH_LIMIT,
+            bitmap_batch_limit: MAX_BATCH_LIMIT,
             frame_index: 0,
             last_adjust_frame: None,
         }
@@ -130,7 +133,7 @@ impl FrameMetrics {
     }
 
     /// Call at the **end** of `submit_frame` with the `Instant` from
-    /// `begin_frame`.  Updates the EMA and adjusts the batch limit.
+    /// `begin_frame`.  Updates the EMA and adjusts both per-type batch limits.
     fn end_frame(&mut self, started_at: Instant) {
         let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -154,7 +157,12 @@ impl FrameMetrics {
                 self.frame_index.saturating_sub(last) >= COOLDOWN_FRAMES
             });
             if warmed_up && cooldown_elapsed {
-                let current = self.batch_limit as f64;
+                // Both limits share the same EMA signal and follow the same
+                // lerp formula.  They are updated together so the cooldown
+                // window covers both.  Using rect_batch_limit as the shared
+                // "current" value is safe because both limits always move in
+                // lock-step and therefore remain equal.
+                let current = self.rect_batch_limit as f64;
 
                 let new_limit = if self.smoothed_ms > PRESSURE_THRESHOLD_MS {
                     // Under pressure: gradually move toward the minimum limit.
@@ -168,7 +176,8 @@ impl FrameMetrics {
                         + MIN_BATCH_LIMIT as f64 * LERP_STEP_DOWN;
                     Some((new.floor() as usize).max(MIN_BATCH_LIMIT))
                 } else if self.smoothed_ms < RELIEF_THRESHOLD_MS
-                    && self.batch_limit < MAX_BATCH_LIMIT
+                    && (self.rect_batch_limit < MAX_BATCH_LIMIT
+                        || self.bitmap_batch_limit < MAX_BATCH_LIMIT)
                 {
                     // Headroom available: gradually recover toward the maximum.
                     // Uses the smaller LERP_STEP_UP so recovery is deliberately
@@ -186,8 +195,18 @@ impl FrameMetrics {
                 };
 
                 if let Some(limit) = new_limit {
-                    if limit != self.batch_limit {
-                        self.batch_limit = limit;
+                    // Apply the computed limit to both per-type limits and
+                    // record the adjustment frame if either actually changed.
+                    let mut adjusted = false;
+                    if limit != self.rect_batch_limit {
+                        self.rect_batch_limit = limit;
+                        adjusted = true;
+                    }
+                    if limit != self.bitmap_batch_limit {
+                        self.bitmap_batch_limit = limit;
+                        adjusted = true;
+                    }
+                    if adjusted {
                         // Record the frame on which the change was made so the
                         // cooldown window is anchored to actual adjustments.
                         self.last_adjust_frame = Some(self.frame_index);
@@ -200,10 +219,16 @@ impl FrameMetrics {
         self.frame_index = self.frame_index.saturating_add(1);
     }
 
-    /// Current batch-size limit to use for both rect and bitmap instanced
-    /// batches.  Always in `[MIN_BATCH_LIMIT, MAX_BATCH_LIMIT]`.
-    fn batch_limit(&self) -> usize {
-        self.batch_limit
+    /// Current batch-size limit for `DrawRectInstanced` batches.
+    /// Always in `[MIN_BATCH_LIMIT, MAX_BATCH_LIMIT]`.
+    fn rect_batch_limit(&self) -> usize {
+        self.rect_batch_limit
+    }
+
+    /// Current batch-size limit for `DrawBitmapInstanced` batches.
+    /// Always in `[MIN_BATCH_LIMIT, MAX_BATCH_LIMIT]`.
+    fn bitmap_batch_limit(&self) -> usize {
+        self.bitmap_batch_limit
     }
 }
 
@@ -693,7 +718,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         // update the adaptive batch-limit after submission completes.  This is
         // purely a performance hint; it does not affect game logic or AS3.
         let frame_start = self.frame_metrics.begin_frame();
-        let batch_limit = self.frame_metrics.batch_limit();
+        let rect_batch_limit = self.frame_metrics.rect_batch_limit();
+        let bitmap_batch_limit = self.frame_metrics.bitmap_batch_limit();
 
         let frame_output = match self.target.get_next_texture() {
             Ok(frame) => frame,
@@ -737,7 +763,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &mut self.active_frame.command_encoder,
                     LayerRef::None,
                     &mut self.offscreen_texture_pool,
-                    batch_limit,
+                    rect_batch_limit,
+                    bitmap_batch_limit,
                 );
             } else {
                 // We're relying on there being no impotent filters here,
@@ -762,7 +789,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &mut self.active_frame.command_encoder,
                     LayerRef::None,
                     &mut self.offscreen_texture_pool,
-                    batch_limit,
+                    rect_batch_limit,
+                    bitmap_batch_limit,
                 );
                 for filter in entry.filters {
                     target = self.descriptors.filters.apply(
@@ -808,7 +836,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             commands,
             LayerRef::None,
             &mut self.texture_pool,
-            batch_limit,
+            rect_batch_limit,
+            bitmap_batch_limit,
         );
         self.active_frame.staging_belt.finish();
 
@@ -972,7 +1001,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             commands,
             LayerRef::Current,
             &mut self.offscreen_texture_pool,
-            self.frame_metrics.batch_limit(),
+            self.frame_metrics.rect_batch_limit(),
+            self.frame_metrics.bitmap_batch_limit(),
         );
 
         self.active_frame.maybe_flush(&self.descriptors);
