@@ -1139,6 +1139,7 @@ pub async fn request_adapter_and_device(
         })?;
 
     let info = adapter.get_info();
+    if info.backend == wgpu::Backend::Vulkan && backend == wgpu::Backends::VULKAN {
     if info.backend == wgpu::Backend::Vulkan {
         tracing::info!("Explicitly selected Vulkan backend.");
     }
