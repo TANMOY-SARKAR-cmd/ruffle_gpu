@@ -1,7 +1,7 @@
 use crate::blend::{ComplexBlend, TrivialBlend};
 use crate::layouts::BindLayouts;
 use crate::shaders::Shaders;
-use crate::{MaskState, PosColorVertex, PosVertex, RectInstance};
+use crate::{MaskState, PosColorVertex, PosVertex, BitmapInstance, RectInstance};
 use enum_map::{Enum, EnumMap, enum_map};
 use wgpu::{BlendState, PrimitiveTopology, vertex_attr_array};
 
@@ -23,6 +23,30 @@ pub const VERTEX_BUFFERS_DESCRIPTION_COLOR: [wgpu::VertexBufferLayout; 1] =
             1 => Float32x4,
         ],
     }];
+
+/// Two-slot vertex buffer layout for the instanced bitmap pipeline.
+///
+/// Slot 0 (`Vertex` step): unit-quad positions from the shared `Quad` buffer.
+/// Slot 1 (`Instance` step): per-bitmap `BitmapInstance` data — affine transform
+/// (ab, cd, txty), multiplicative color (mult_color), and additive color (add_color).
+pub const VERTEX_BUFFERS_DESCRIPTION_BITMAP_INSTANCED: [wgpu::VertexBufferLayout; 2] = [
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<PosVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &vertex_attr_array![0 => Float32x2],
+    },
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<BitmapInstance>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &vertex_attr_array![
+            1 => Float32x2,  // x_axis
+            2 => Float32x2,  // y_axis
+            3 => Float32x2,  // translation
+            4 => Float32x4,  // mult_color
+            5 => Float32x4,  // add_color
+        ],
+    },
+];
 
 /// Two-slot vertex buffer layout for the instanced solid-colour rect pipeline.
 ///
@@ -75,6 +99,12 @@ pub struct Pipelines {
     /// colour are supplied via a per-instance vertex buffer (slot 1), and the
     /// shared unit-quad geometry is supplied in slot 0.
     pub rect_instanced: ShapePipeline,
+    /// Pipeline for instanced bitmap rendering.
+    /// Uses globals (group 0) and bitmap (group 1: texture_transforms, texture,
+    /// sampler).  Per-instance transform and color transforms are supplied via
+    /// a per-instance vertex buffer (slot 1); the shared unit-quad geometry is
+    /// in slot 0.  One `EnumMap` entry per `TrivialBlend` mode.
+    pub bitmap_instanced: EnumMap<TrivialBlend, ShapePipeline>,
 }
 
 impl ShapePipeline {
@@ -295,6 +325,29 @@ impl Pipelines {
             PrimitiveTopology::TriangleList,
         );
 
+        // Instanced bitmap pipeline: unit-quad geometry in slot 0,
+        // per-instance transform + color transforms in slot 1.  Group 0 is
+        // globals; group 1 is the bitmap bind group (texture_transforms,
+        // texture, sampler).  One pipeline variant per TrivialBlend.
+        let bitmap_instanced_bindings = vec![&bind_layouts.globals, &bind_layouts.bitmap];
+        let bitmap_instanced_pipelines: [ShapePipeline; TrivialBlend::LENGTH] =
+            std::array::from_fn(|blend| {
+                let blend = TrivialBlend::from_usize(blend);
+                let name = format!("Bitmap Instanced ({blend:?})");
+                create_shape_pipeline(
+                    &name,
+                    device,
+                    format,
+                    &shaders.bitmap_instanced_shader,
+                    msaa_sample_count,
+                    &VERTEX_BUFFERS_DESCRIPTION_BITMAP_INSTANCED,
+                    &bitmap_instanced_bindings,
+                    blend.blend_state(),
+                    &[],
+                    PrimitiveTopology::TriangleList,
+                )
+            });
+
         Self {
             color: color_pipelines,
             lines: lines_pipelines,
@@ -305,6 +358,7 @@ impl Pipelines {
             complex_blends: complex_blend_pipelines,
             alpha_mask: alpha_mask_pipeline,
             rect_instanced: rect_instanced_pipeline,
+            bitmap_instanced: EnumMap::from_array(bitmap_instanced_pipelines),
         }
     }
 }

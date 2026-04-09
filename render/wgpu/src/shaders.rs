@@ -10,6 +10,12 @@ pub struct Shaders {
     /// transform and premultiplied colour in a per-instance vertex buffer,
     /// so no per-object transform uniform (group 1) is needed.
     pub rect_instanced_shader: wgpu::ShaderModule,
+    /// Shader for instanced bitmap rendering.
+    /// Uses group(0) globals and group(1) bitmap (texture_transforms, texture,
+    /// sampler).  Each instance carries its own 2D affine transform and color
+    /// transforms in a per-instance vertex buffer, so no per-object transform
+    /// uniform is needed.
+    pub bitmap_instanced_shader: wgpu::ShaderModule,
     /// This has a pipeline-overridable `bool` constant, `late_saturate`,
     /// with a default of `false`. It switches to performing saturation
     /// after re-multiplying the alpha, rather than before. This is used
@@ -36,6 +42,11 @@ impl Shaders {
             device,
             "rect_instanced.wgsl",
             include_str!("../shaders/rect_instanced.wgsl"),
+        );
+        let bitmap_instanced_shader = make_shader(
+            device,
+            "bitmap_instanced.wgsl",
+            include_str!("../shaders/bitmap_instanced.wgsl"),
         );
         let bitmap_shader = make_shader(
             device,
@@ -99,6 +110,7 @@ impl Shaders {
         Self {
             color_shader,
             rect_instanced_shader,
+            bitmap_instanced_shader,
             bitmap_shader,
             gradient_shader,
             copy_srgb_shader,

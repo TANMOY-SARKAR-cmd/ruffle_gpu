@@ -123,6 +123,26 @@ pub struct RectInstance {
     pub color:       [f32; 4],
 }
 
+/// Per-instance data for the instanced bitmap pipeline.
+///
+/// Encodes the 2D affine transform that maps the unit quad [0,1]×[0,1] to
+/// world space, plus multiplicative and additive color transforms.
+/// Layout (56 bytes):
+///   bytes  0–7  : `x_axis`      = [a, b]  — x-axis of the 2D world matrix
+///   bytes  8–15 : `y_axis`      = [c, d]  — y-axis of the 2D world matrix
+///   bytes 16–23 : `translation` = [tx, ty] — world-space translation
+///   bytes 24–39 : `mult_color`  = [mr, mg, mb, ma] — multiplicative color transform
+///   bytes 40–55 : `add_color`   = [ar, ag, ab, aa] — additive color transform
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct BitmapInstance {
+    pub x_axis:      [f32; 2],
+    pub y_axis:      [f32; 2],
+    pub translation: [f32; 2],
+    pub mult_color:  [f32; 4],
+    pub add_color:   [f32; 4],
+}
+
 impl From<TessVertex> for PosColorVertex {
     fn from(vertex: TessVertex) -> Self {
         Self {
