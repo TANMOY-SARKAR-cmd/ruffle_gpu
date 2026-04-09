@@ -5,6 +5,10 @@ use ruffle_render::shader_source::SHADER_FILTER_COMMON;
 #[derive(Debug)]
 pub struct Shaders {
     pub color_shader: wgpu::ShaderModule,
+    /// Shader for batched pre-transformed solid color fills (rect batching).
+    /// Uses only group(0) globals; world-space positions and premultiplied
+    /// colors are baked into the vertex buffer on the CPU.
+    pub color_pretransformed_shader: wgpu::ShaderModule,
     /// This has a pipeline-overridable `bool` constant, `late_saturate`,
     /// with a default of `false`. It switches to performing saturation
     /// after re-multiplying the alpha, rather than before. This is used
@@ -27,6 +31,11 @@ pub struct Shaders {
 impl Shaders {
     pub fn new(device: &wgpu::Device) -> Self {
         let color_shader = make_shader(device, "color.wgsl", include_str!("../shaders/color.wgsl"));
+        let color_pretransformed_shader = make_shader(
+            device,
+            "color_pretransformed.wgsl",
+            include_str!("../shaders/color_pretransformed.wgsl"),
+        );
         let bitmap_shader = make_shader(
             device,
             "bitmap.wgsl",
@@ -88,6 +97,7 @@ impl Shaders {
 
         Self {
             color_shader,
+            color_pretransformed_shader,
             bitmap_shader,
             gradient_shader,
             copy_srgb_shader,

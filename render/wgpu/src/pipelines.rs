@@ -47,6 +47,11 @@ pub struct Pipelines {
     pub gradients: ShapePipeline,
     pub complex_blends: EnumMap<ComplexBlend, ShapePipeline>,
     pub alpha_mask: ShapePipeline,
+    /// Pipeline for batched pre-transformed colored rectangles.
+    /// Uses only the globals bind group (group 0); no per-object transform
+    /// uniform is required because world-space positions and premultiplied
+    /// colors are baked into the vertex buffer.
+    pub batched_color: ShapePipeline,
 }
 
 impl ShapePipeline {
@@ -250,6 +255,22 @@ impl Pipelines {
             PrimitiveTopology::TriangleList,
         );
 
+        // Batched color pipeline: world-space positions + premultiplied colors
+        // baked into the vertex buffer. Only group(0) globals are needed.
+        let batched_color_bindings = vec![&bind_layouts.globals];
+        let batched_color_pipeline = create_shape_pipeline(
+            "Batched Color",
+            device,
+            format,
+            &shaders.color_pretransformed_shader,
+            msaa_sample_count,
+            &VERTEX_BUFFERS_DESCRIPTION_COLOR,
+            &batched_color_bindings,
+            BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+            &[],
+            PrimitiveTopology::TriangleList,
+        );
+
         Self {
             color: color_pipelines,
             lines: lines_pipelines,
@@ -259,6 +280,7 @@ impl Pipelines {
             gradients: gradient_pipeline,
             complex_blends: complex_blend_pipelines,
             alpha_mask: alpha_mask_pipeline,
+            batched_color: batched_color_pipeline,
         }
     }
 }
