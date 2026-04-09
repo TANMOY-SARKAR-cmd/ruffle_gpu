@@ -60,7 +60,7 @@ fn get_channel() -> Cow<'static, str> {
 }
 
 fn sanitize_for_cargo_output(input: &str) -> String {
-    input.replace('\n', "").replace('\r', "")
+    input.replace(['\n', '\r'], "")
 }
 
 fn set_windows_resource() -> Result<(), Box<dyn Error>> {
