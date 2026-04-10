@@ -8,6 +8,11 @@
 
 // NOTE: The `common.wgsl` source is prepended to this before compilation.
 
+/// Absolute minimum luma range below which FXAA and sharpen are skipped.
+/// Protects pixel art and flat UI from being blurred or processed.
+/// Value = 1/32 ≈ 0.031.
+const THRESHOLD_LOW: f32 = 0.03125;
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -56,10 +61,9 @@ fn fxaa(uv: vec2<f32>, px: vec2<f32>) -> vec4<f32> {
         return center;
     }
 
-    // Additional guard (Step 4): absolute minimum below which FXAA is skipped
+    // Additional guard: absolute minimum below which FXAA is skipped
     // to preserve pixel art and flat UI sharpness.
-    let threshold_low = 0.03125; // 1/32
-    if luma_range < threshold_low {
+    if luma_range < THRESHOLD_LOW {
         return center;
     }
 
@@ -136,8 +140,7 @@ fn main_fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let luma_max_pre = max(lc_pre, max(max(ln_pre, ls_pre), max(le_pre, lw_pre)));
     let luma_range_pre = luma_max_pre - min(lc_pre, min(min(ln_pre, ls_pre), min(le_pre, lw_pre)));
 
-    let threshold_low = 0.03125; // 1/32
-    if luma_range_pre < threshold_low {
+    if luma_range_pre < THRESHOLD_LOW {
         let corrected = color_correct(center);
         return common__srgb_to_linear(corrected);
     }
