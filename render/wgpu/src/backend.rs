@@ -866,6 +866,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         self.offscreen_texture_pool.purge_if_oversized();
         // Trim the per-frame vertex-instance buffer pool.
         self.descriptors.vertex_instance_pool.purge_if_oversized();
+        // Trim the gradient texture cache to prevent unbounded VRAM growth.
+        self.descriptors.purge_gradient_cache_if_oversized();
 
         // ── Update adaptive metrics after the frame has been submitted ────────
         self.frame_metrics.end_frame(frame_start);

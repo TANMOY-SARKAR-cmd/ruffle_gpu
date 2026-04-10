@@ -47,6 +47,9 @@ pub struct Descriptors {
     /// a 256×1 RGBA texture per shape is wasteful; this cache lets all shapes
     /// with identical colour stops share a single GPU texture allocation.
     /// `wgpu::Texture` is cheaply cloneable (internally Arc-backed).
+    ///
+    /// The cache is bounded by [`Self::purge_gradient_cache_if_oversized`],
+    /// which is called at the end of every frame.
     pub(crate) gradient_texture_cache: Mutex<HashMap<GradientCacheKey, wgpu::Texture>>,
 }
 
@@ -90,6 +93,23 @@ impl Descriptors {
             filters,
             vertex_instance_pool: VertexInstancePool::new(),
             gradient_texture_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Evict the gradient texture cache once it grows beyond `MAX_ENTRIES`.
+    ///
+    /// Each entry is a 256×1 RGBA8 texture (≈ 1 KiB GPU memory).  The cap
+    /// keeps worst-case VRAM usage bounded at roughly `MAX_ENTRIES` KiB while
+    /// still achieving good reuse across typical SWF content (which tends to
+    /// reuse a small number of gradient definitions).
+    pub fn purge_gradient_cache_if_oversized(&self) {
+        const MAX_ENTRIES: usize = 256;
+        let mut cache = self
+            .gradient_texture_cache
+            .lock()
+            .expect("gradient_texture_cache lock poisoned");
+        if cache.len() > MAX_ENTRIES {
+            cache.clear();
         }
     }
 

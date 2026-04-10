@@ -20,8 +20,8 @@ impl TexturePool {
     }
 
     /// Trim each sub-pool so that no more than `max_per_key` idle textures are
-    /// held per distinct `(size, format, usage, sample_count)` key, and evict
-    /// the least-recently-inserted globals entries beyond `max_globals`.
+    /// held per distinct `(size, format, usage, sample_count)` key, and clear
+    /// the entire globals cache once it exceeds `MAX_GLOBALS` entries.
     ///
     /// Call this at the end of every frame instead of replacing the pool with a
     /// fresh `TexturePool::new()`.  This keeps GPU textures alive across frames
@@ -159,15 +159,17 @@ impl<Type, Description: BufferDescription> BufferPool<Type, Description> {
     }
 
     /// Discard any idle pool entries beyond `max_count`, releasing their GPU
-    /// memory.  Entries are removed from the end (LIFO), so the most-recently
-    /// returned ones are retained as they are most likely to be reused.
+    /// memory.  Entries are removed from the front of the Vec (oldest first),
+    /// so the most-recently returned ones (at the back) are retained as they
+    /// are most likely to be reused.
     pub fn purge_excess(&self, max_count: usize) {
         let mut guard = self
             .available
             .lock()
             .expect("Should not be able to lock recursively");
-        if guard.len() > max_count {
-            guard.truncate(max_count);
+        let len = guard.len();
+        if len > max_count {
+            guard.drain(..len - max_count);
         }
     }
 
@@ -273,14 +275,21 @@ impl VertexInstancePool {
 
     /// Return a buffer whose `size()` is ≥ `min_bytes`.
     ///
-    /// If the pool holds a suitable buffer it is recycled; otherwise a new
-    /// one is created whose capacity is `min_bytes` rounded up to the next
-    /// power of two (at least 256 bytes).
+    /// If the pool holds a suitable buffer it is recycled, preferring the
+    /// smallest one that fits (best-fit) to minimise wasted GPU memory.
+    /// If no suitable buffer exists, a new one is created whose capacity is
+    /// `min_bytes` rounded up to the next power of two (at least 256 bytes).
     pub fn acquire(&self, device: &wgpu::Device, min_bytes: u64) -> PooledVertexBuffer {
         let buffer = {
             let mut guard = self.inner.lock().expect("vertex pool lock");
-            // Find the smallest pooled buffer that is large enough.
-            if let Some(pos) = guard.iter().position(|b| b.size() >= min_bytes) {
+            // Find the smallest pooled buffer that is large enough (best-fit).
+            let best = guard
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.size() >= min_bytes)
+                .min_by_key(|(_, b)| b.size())
+                .map(|(i, _)| i);
+            if let Some(pos) = best {
                 guard.swap_remove(pos)
             } else {
                 let size = min_bytes.next_power_of_two().max(256);
