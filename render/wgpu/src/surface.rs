@@ -18,7 +18,7 @@ use std::sync::Arc;
 use target::CommandTarget;
 use tracing::instrument;
 
-use crate::utils::run_copy_pipeline;
+use crate::utils::run_post_process_pipeline;
 
 pub use crate::surface::commands::LayerRef;
 
@@ -96,7 +96,7 @@ impl Surface {
             bitmap_batch_limit,
         );
 
-        run_copy_pipeline(
+        run_post_process_pipeline(
             descriptors,
             self.format,
             self.actual_surface_format,

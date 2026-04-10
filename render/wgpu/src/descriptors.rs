@@ -23,6 +23,10 @@ pub struct Descriptors {
     pub quad: Quad,
     copy_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
     copy_srgb_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
+    /// Pipeline cache for the final post-process pass (formats match).
+    post_process_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
+    /// Pipeline cache for the final post-process pass (sRGB surface variant).
+    post_process_srgb_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
     pub shaders: Shaders,
     pipelines: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), Arc<Pipelines>>>,
     pub filters: Filters,
@@ -61,6 +65,8 @@ impl Descriptors {
             quad,
             copy_pipeline: Default::default(),
             copy_srgb_pipeline: Default::default(),
+            post_process_pipeline: Default::default(),
+            post_process_srgb_pipeline: Default::default(),
             shaders,
             pipelines: Default::default(),
             filters,
@@ -176,6 +182,143 @@ impl Descriptors {
                                 format,
                                 // All of our blending has been done by now, so we want
                                 // to overwrite the target pixels without any blending
+                                blend: Some(wgpu::BlendState::REPLACE),
+                                write_mask: Default::default(),
+                            })],
+                            compilation_options: Default::default(),
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleList,
+                            strip_index_format: None,
+                            front_face: wgpu::FrontFace::Ccw,
+                            cull_mode: None,
+                            polygon_mode: wgpu::PolygonMode::default(),
+                            unclipped_depth: false,
+                            conservative: false,
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState {
+                            count: msaa_sample_count,
+                            mask: !0,
+                            alpha_to_coverage_enabled: false,
+                        },
+                        multiview: None,
+                        cache: None,
+                    })
+            })
+            .clone()
+    }
+
+    /// Returns the post-process pipeline for the given format and sample count.
+    /// This pipeline replaces the plain copy for the scene → swapchain step,
+    /// adding bilinear filtering, FXAA, sharpening, and colour correction.
+    /// Used when the internal format equals the surface format.
+    pub fn post_process_pipeline(
+        &self,
+        format: wgpu::TextureFormat,
+        msaa_sample_count: u32,
+    ) -> wgpu::RenderPipeline {
+        let mut pipelines = self
+            .post_process_pipeline
+            .lock()
+            .expect("Pipelines should not be already locked");
+        pipelines
+            .entry((msaa_sample_count, format))
+            .or_insert_with(|| {
+                let layout = self
+                    .device
+                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: create_debug_label!("Post-process pipeline layout").as_deref(),
+                        bind_group_layouts: &[
+                            &self.bind_layouts.globals,
+                            &self.bind_layouts.transforms,
+                            &self.bind_layouts.bitmap,
+                        ],
+                        push_constant_ranges: &[],
+                    });
+                self.device
+                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: create_debug_label!("Post-process pipeline").as_deref(),
+                        layout: Some(&layout),
+                        vertex: wgpu::VertexState {
+                            module: &self.shaders.post_process_shader,
+                            entry_point: Some("main_vertex"),
+                            buffers: &VERTEX_BUFFERS_DESCRIPTION_POS,
+                            compilation_options: Default::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &self.shaders.post_process_shader,
+                            entry_point: Some("main_fragment"),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format,
+                                blend: Some(wgpu::BlendState::REPLACE),
+                                write_mask: Default::default(),
+                            })],
+                            compilation_options: Default::default(),
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: wgpu::PrimitiveTopology::TriangleList,
+                            strip_index_format: None,
+                            front_face: wgpu::FrontFace::Ccw,
+                            cull_mode: None,
+                            polygon_mode: wgpu::PolygonMode::default(),
+                            unclipped_depth: false,
+                            conservative: false,
+                        },
+                        depth_stencil: None,
+                        multisample: wgpu::MultisampleState {
+                            count: msaa_sample_count,
+                            mask: !0,
+                            alpha_to_coverage_enabled: false,
+                        },
+                        multiview: None,
+                        cache: None,
+                    })
+            })
+            .clone()
+    }
+
+    /// Returns the post-process pipeline for the given sRGB surface format.
+    /// Identical to `post_process_pipeline` but additionally applies the
+    /// sRGB colour-space conversion before writing to the sRGB swapchain.
+    pub fn post_process_srgb_pipeline(
+        &self,
+        format: wgpu::TextureFormat,
+        msaa_sample_count: u32,
+    ) -> wgpu::RenderPipeline {
+        let mut pipelines = self
+            .post_process_srgb_pipeline
+            .lock()
+            .expect("Pipelines should not be already locked");
+        pipelines
+            .entry((msaa_sample_count, format))
+            .or_insert_with(|| {
+                let layout = self
+                    .device
+                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: create_debug_label!("Post-process sRGB pipeline layout").as_deref(),
+                        bind_group_layouts: &[
+                            &self.bind_layouts.globals,
+                            &self.bind_layouts.transforms,
+                            &self.bind_layouts.bitmap,
+                        ],
+                        push_constant_ranges: &[],
+                    });
+                self.device
+                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: create_debug_label!("Post-process sRGB pipeline").as_deref(),
+                        layout: Some(&layout),
+                        vertex: wgpu::VertexState {
+                            module: &self.shaders.post_process_srgb_shader,
+                            entry_point: Some("main_vertex"),
+                            buffers: &VERTEX_BUFFERS_DESCRIPTION_POS,
+                            compilation_options: Default::default(),
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &self.shaders.post_process_srgb_shader,
+                            entry_point: Some("main_fragment"),
+                            targets: &[Some(wgpu::ColorTargetState {
+                                format,
                                 blend: Some(wgpu::BlendState::REPLACE),
                                 write_mask: Default::default(),
                             })],

@@ -33,6 +33,12 @@ pub struct Shaders {
     pub glow_filter: wgpu::ShaderModule,
     pub bevel_filter: wgpu::ShaderModule,
     pub displacement_map_filter: wgpu::ShaderModule,
+    /// Final-display post-process shader (FXAA + sharpen + colour correction).
+    /// Used only for the scene → swapchain copy when formats match.
+    pub post_process_shader: wgpu::ShaderModule,
+    /// Final-display post-process shader with sRGB conversion.
+    /// Used when the internal render format differs from the sRGB surface format.
+    pub post_process_srgb_shader: wgpu::ShaderModule,
 }
 
 impl Shaders {
@@ -107,6 +113,17 @@ impl Shaders {
             ComplexBlend::HardLight => make_shader(device, "blend/hardlight.wgsl", include_str!("../shaders/blend/hardlight.wgsl")),
         };
 
+        let post_process_shader = make_shader(
+            device,
+            "post_process.wgsl",
+            include_str!("../shaders/post_process.wgsl"),
+        );
+        let post_process_srgb_shader = make_shader(
+            device,
+            "post_process_srgb.wgsl",
+            include_str!("../shaders/post_process_srgb.wgsl"),
+        );
+
         Self {
             color_shader,
             rect_instanced_shader,
@@ -122,6 +139,8 @@ impl Shaders {
             glow_filter,
             bevel_filter,
             displacement_map_filter,
+            post_process_shader,
+            post_process_srgb_shader,
         }
     }
 }
