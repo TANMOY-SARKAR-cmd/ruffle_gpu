@@ -354,25 +354,37 @@ impl CommonGradient {
 
             colors
         };
-        let texture = descriptors.device.create_texture_with_data(
-            &descriptors.queue,
-            &wgpu::TextureDescriptor {
-                label: None,
-                size: wgpu::Extent3d {
-                    width: GRADIENT_SIZE as u32,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &colors[..],
-        );
+        let cache_key = (gradient.interpolation, gradient.records.clone());
+        let texture = {
+            let mut cache = descriptors
+                .gradient_texture_cache
+                .lock()
+                .expect("gradient_texture_cache lock poisoned");
+            cache
+                .entry(cache_key)
+                .or_insert_with(|| {
+                    descriptors.device.create_texture_with_data(
+                        &descriptors.queue,
+                        &wgpu::TextureDescriptor {
+                            label: None,
+                            size: wgpu::Extent3d {
+                                width: GRADIENT_SIZE as u32,
+                                height: 1,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                            view_formats: &[],
+                        },
+                        wgpu::util::TextureDataOrder::LayerMajor,
+                        &colors[..],
+                    )
+                })
+                .clone()
+        };
         let view = texture.create_view(&Default::default());
 
         let buffer_offset = uniform_buffers
