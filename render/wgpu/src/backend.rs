@@ -10,8 +10,8 @@ use crate::target::{MaybeOwnedBuffer, TextureTarget};
 use crate::target::{RenderTargetFrame, TextureBufferInfo};
 use crate::utils::{BufferDimensions, run_copy_pipeline};
 use crate::{
-    Descriptors, Error, QueueSyncHandle, RenderTarget, SwapChainTarget, Texture, as_texture,
-    format_list, get_backend_names,
+    Descriptors, Error, PostProcessQuality, QueueSyncHandle, RenderTarget, SwapChainTarget,
+    Texture, as_texture, format_list, get_backend_names,
 };
 use image::imageops::FilterType;
 use ruffle_render::backend::{
@@ -436,6 +436,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         let surface = Surface::new(
             &descriptors,
             StageQuality::Low,
+            PostProcessQuality::High,
             target.width(),
             target.height(),
             target.format(),
@@ -631,6 +632,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         self.surface = Surface::new(
             &self.descriptors,
             self.surface.quality(),
+            self.surface.post_process_quality(),
             width,
             height,
             self.target.format(),
@@ -692,6 +694,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         self.surface = Surface::new(
             &self.descriptors,
             quality,
+            self.surface.post_process_quality(),
             self.surface.size().width,
             self.surface.size().height,
             self.target.format(),
@@ -750,6 +753,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             let mut surface = Surface::new(
                 &self.descriptors,
                 self.surface.quality(),
+                self.surface.post_process_quality(),
                 texture.texture.width(),
                 texture.texture.height(),
                 wgpu::TextureFormat::Rgba8Unorm,
@@ -996,6 +1000,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         let mut surface = Surface::new(
             &self.descriptors,
             quality,
+            PostProcessQuality::High,
             texture.texture.width(),
             texture.texture.height(),
             wgpu::TextureFormat::Rgba8Unorm,

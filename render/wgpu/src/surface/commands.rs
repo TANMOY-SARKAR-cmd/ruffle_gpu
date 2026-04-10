@@ -7,7 +7,7 @@ use crate::dynamic_transforms::DynamicTransforms;
 use crate::mesh::{DrawType, Mesh, as_mesh};
 use crate::surface::Surface;
 use crate::surface::target::CommandTarget;
-use crate::{Descriptors, MaskState, Pipelines, BitmapInstance, RectInstance, Transforms, as_texture};
+use crate::{Descriptors, MaskState, Pipelines, PostProcessQuality, BitmapInstance, RectInstance, Transforms, as_texture};
 use ruffle_render::backend::ShapeHandle;
 use ruffle_render::bitmap::{BitmapHandle, PixelSnapping};
 use ruffle_render::commands::{CommandHandler, CommandList, RenderBlendMode};
@@ -1195,6 +1195,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         let mut surface = Surface::new(
             self.descriptors,
             self.quality,
+            PostProcessQuality::High,
             self.width,
             self.height,
             wgpu::TextureFormat::Rgba8Unorm,
@@ -1473,6 +1474,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         let mut surface = Surface::new(
             self.descriptors,
             self.quality,
+            PostProcessQuality::High,
             self.width,
             self.height,
             wgpu::TextureFormat::Rgba8Unorm,
