@@ -6,6 +6,7 @@ use crate::{
     BitmapSamplers, Pipelines, PosColorVertex, PosVertex, TextureTransforms,
     create_buffer_with_data,
 };
+use crate::buffer_pool::VertexInstancePool;
 use fnv::FnvHashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
@@ -30,6 +31,10 @@ pub struct Descriptors {
     pub shaders: Shaders,
     pipelines: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), Arc<Pipelines>>>,
     pub filters: Filters,
+    /// Pool of reusable `VERTEX | COPY_DST` buffers for per-frame instance data.
+    /// Shared across all rendering paths via `Descriptors`; thread-safe
+    /// through the pool's internal `Mutex`.
+    pub vertex_instance_pool: VertexInstancePool,
 }
 
 impl Debug for Descriptors {
@@ -70,6 +75,7 @@ impl Descriptors {
             shaders,
             pipelines: Default::default(),
             filters,
+            vertex_instance_pool: VertexInstancePool::new(),
         }
     }
 

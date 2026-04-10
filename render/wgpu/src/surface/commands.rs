@@ -2,7 +2,7 @@ use crate::backend::RenderTargetMode;
 use crate::blend::TrivialBlend;
 use crate::blend::{BlendType, ComplexBlend};
 use crate::buffer_builder::BufferBuilder;
-use crate::buffer_pool::TexturePool;
+use crate::buffer_pool::{PooledVertexBuffer, TexturePool};
 use crate::dynamic_transforms::DynamicTransforms;
 use crate::mesh::{DrawType, Mesh, as_mesh};
 use crate::surface::Surface;
@@ -19,7 +19,6 @@ use ruffle_render::transform::Transform;
 use std::mem;
 use swf::{BlendMode, Color, ColorTransform, Twips};
 use wgpu::Backend;
-use wgpu::util::DeviceExt;
 
 use super::target::PoolOrArcTexture;
 
@@ -206,7 +205,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
                 num_instances,
                 smoothing,
                 blend_mode,
-            } => self.draw_bitmap_instanced(bitmap, instances, *num_instances, *smoothing, *blend_mode),
+            } => self.draw_bitmap_instanced(bitmap, &**instances, *num_instances, *smoothing, *blend_mode),
             DrawCommand::RenderTexture {
                 _texture,
                 binds,
@@ -227,7 +226,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             DrawCommand::DrawRectInstanced {
                 instances,
                 num_instances,
-            } => self.draw_rect_instanced(instances, *num_instances),
+            } => self.draw_rect_instanced(&**instances, *num_instances),
             DrawCommand::PendingRectBatch(_) | DrawCommand::PendingBitmapBatch { .. } => {
                 unreachable!("pending batch commands must be consumed by optimize_draw_commands before rendering")
             }
@@ -707,7 +706,7 @@ pub enum DrawCommand {
     /// commands.  Never appears as a pre-optimization intermediate.
     DrawBitmapInstanced {
         bitmap: BitmapHandle,
-        instances: wgpu::Buffer,
+        instances: PooledVertexBuffer,
         num_instances: u32,
         smoothing: bool,
         blend_mode: TrivialBlend,
@@ -721,7 +720,7 @@ pub enum DrawCommand {
     /// Produced by `optimize_draw_commands` after merging `PendingRectBatch`
     /// commands.  Never appears as a pre-optimization intermediate.
     DrawRectInstanced {
-        instances: wgpu::Buffer,
+        instances: PooledVertexBuffer,
         num_instances: u32,
     },
     /// Accumulated rect instances that have not yet been GPU-materialized.
@@ -777,7 +776,7 @@ pub enum LayerRef<'a> {
 /// quadratic reallocation of the old pairwise approach.
 fn optimize_draw_commands(
     commands: Vec<DrawCommand>,
-    device: &wgpu::Device,
+    descriptors: &Descriptors,
     rect_batch_limit: usize,
     bitmap_batch_limit: usize,
 ) -> Vec<DrawCommand> {
@@ -785,17 +784,17 @@ fn optimize_draw_commands(
     fn emit_rect_run(
         run: &mut Vec<RectInstance>,
         out: &mut Vec<DrawCommand>,
-        device: &wgpu::Device,
+        descriptors: &Descriptors,
     ) {
         if run.is_empty() {
             return;
         }
         let num_instances = run.len() as u32;
-        let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: create_debug_label!("Rect instanced buffer").as_deref(),
-            contents: bytemuck::cast_slice(run),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let byte_data: &[u8] = bytemuck::cast_slice(run);
+        let instances = descriptors
+            .vertex_instance_pool
+            .acquire(&descriptors.device, byte_data.len() as u64);
+        descriptors.queue.write_buffer(&instances, 0, byte_data);
         run.clear();
         out.push(DrawCommand::DrawRectInstanced {
             instances,
@@ -806,7 +805,7 @@ fn optimize_draw_commands(
     fn emit_bitmap_run(
         run: &mut Option<(BitmapHandle, bool, TrivialBlend, Vec<BitmapInstance>)>,
         out: &mut Vec<DrawCommand>,
-        device: &wgpu::Device,
+        descriptors: &Descriptors,
     ) {
         let Some((bitmap, smoothing, blend_mode, bitmaps)) = run.take() else {
             return;
@@ -815,11 +814,11 @@ fn optimize_draw_commands(
         // always non-empty here.
         debug_assert!(!bitmaps.is_empty());
         let num_instances = bitmaps.len() as u32;
-        let instances = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: create_debug_label!("Bitmap instanced buffer").as_deref(),
-            contents: bytemuck::cast_slice(&bitmaps),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let byte_data: &[u8] = bytemuck::cast_slice(&bitmaps);
+        let instances = descriptors
+            .vertex_instance_pool
+            .acquire(&descriptors.device, byte_data.len() as u64);
+        descriptors.queue.write_buffer(&instances, 0, byte_data);
         out.push(DrawCommand::DrawBitmapInstanced {
             bitmap,
             instances,
@@ -838,19 +837,19 @@ fn optimize_draw_commands(
             // ── Rect batches ──────────────────────────────────────────────
             DrawCommand::PendingRectBatch(mut new_rects) => {
                 // Different type: flush any in-progress bitmap run.
-                emit_bitmap_run(&mut bitmap_run, &mut out, device);
+                emit_bitmap_run(&mut bitmap_run, &mut out, descriptors);
 
                 // If adding new_rects would exceed the limit, flush the
                 // current rect run first.
                 if !rect_run.is_empty()
                     && rect_run.len() + new_rects.len() > rect_batch_limit
                 {
-                    emit_rect_run(&mut rect_run, &mut out, device);
+                    emit_rect_run(&mut rect_run, &mut out, descriptors);
                 }
                 rect_run.append(&mut new_rects);
                 // Emit immediately if we hit the cap exactly.
                 if rect_run.len() >= rect_batch_limit {
-                    emit_rect_run(&mut rect_run, &mut out, device);
+                    emit_rect_run(&mut rect_run, &mut out, descriptors);
                 }
             }
 
@@ -862,7 +861,7 @@ fn optimize_draw_commands(
                 blend_mode,
             } => {
                 // Different type: flush any in-progress rect run.
-                emit_rect_run(&mut rect_run, &mut out, device);
+                emit_rect_run(&mut rect_run, &mut out, descriptors);
 
                 let same_key = bitmap_run.as_ref().map_or(false, |(pb, ps, pbl, _)| {
                     *pb == bitmap
@@ -873,7 +872,7 @@ fn optimize_draw_commands(
                 if !same_key {
                     // New key: commit the previous bitmap run (if any) and
                     // start a fresh one.
-                    emit_bitmap_run(&mut bitmap_run, &mut out, device);
+                    emit_bitmap_run(&mut bitmap_run, &mut out, descriptors);
                     bitmap_run = Some((bitmap, smoothing, blend_mode, bitmaps));
                 } else {
                     // Same key: try to extend the current run.
@@ -881,12 +880,12 @@ fn optimize_draw_commands(
                     if !pending.is_empty() && pending.len() + bitmaps.len() > bitmap_batch_limit {
                         // Would exceed the limit: emit the current run and
                         // start a new one with this batch.
-                        emit_bitmap_run(&mut bitmap_run, &mut out, device);
+                        emit_bitmap_run(&mut bitmap_run, &mut out, descriptors);
                         bitmap_run = Some((bitmap, smoothing, blend_mode, bitmaps));
                     } else {
                         pending.append(&mut bitmaps);
                         if pending.len() >= bitmap_batch_limit {
-                            emit_bitmap_run(&mut bitmap_run, &mut out, device);
+                            emit_bitmap_run(&mut bitmap_run, &mut out, descriptors);
                         }
                     }
                 }
@@ -894,16 +893,16 @@ fn optimize_draw_commands(
 
             // ── Everything else ───────────────────────────────────────────
             other => {
-                emit_rect_run(&mut rect_run, &mut out, device);
-                emit_bitmap_run(&mut bitmap_run, &mut out, device);
+                emit_rect_run(&mut rect_run, &mut out, descriptors);
+                emit_bitmap_run(&mut bitmap_run, &mut out, descriptors);
                 out.push(other);
             }
         }
     }
 
     // Flush any trailing runs.
-    emit_rect_run(&mut rect_run, &mut out, device);
-    emit_bitmap_run(&mut bitmap_run, &mut out, device);
+    emit_rect_run(&mut rect_run, &mut out, descriptors);
+    emit_bitmap_run(&mut bitmap_run, &mut out, descriptors);
 
     out
 }
@@ -1104,7 +1103,7 @@ impl<'a> WgpuCommandHandler<'a> {
         if !self.current.is_empty() {
             let cmds = optimize_draw_commands(
                 mem::take(&mut self.current),
-                &self.descriptors.device,
+                self.descriptors,
                 self.rect_batch_limit,
                 self.bitmap_batch_limit,
             );
@@ -1125,7 +1124,7 @@ impl<'a> WgpuCommandHandler<'a> {
         }
         let cmds = optimize_draw_commands(
             mem::take(&mut self.current),
-            &self.descriptors.device,
+            self.descriptors,
             self.rect_batch_limit,
             self.bitmap_batch_limit,
         );

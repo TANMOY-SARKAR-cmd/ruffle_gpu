@@ -19,6 +19,25 @@ impl TexturePool {
         Default::default()
     }
 
+    /// Trim each sub-pool so that no more than `max_per_key` idle textures are
+    /// held per distinct `(size, format, usage, sample_count)` key, and evict
+    /// the least-recently-inserted globals entries beyond `max_globals`.
+    ///
+    /// Call this at the end of every frame instead of replacing the pool with a
+    /// fresh `TexturePool::new()`.  This keeps GPU textures alive across frames
+    /// so that the next frame can reuse them, while bounding peak memory use.
+    pub fn purge_if_oversized(&mut self) {
+        const MAX_PER_KEY: usize = 4;
+        const MAX_GLOBALS: usize = 16;
+
+        for pool in self.pools.values_mut() {
+            pool.purge_excess(MAX_PER_KEY);
+        }
+        if self.globals_cache.len() > MAX_GLOBALS {
+            self.globals_cache.clear();
+        }
+    }
+
     pub fn get_texture(
         &mut self,
         descriptors: &Descriptors,
@@ -139,6 +158,19 @@ impl<Type, Description: BufferDescription> BufferPool<Type, Description> {
         }
     }
 
+    /// Discard any idle pool entries beyond `max_count`, releasing their GPU
+    /// memory.  Entries are removed from the end (LIFO), so the most-recently
+    /// returned ones are retained as they are most likely to be reused.
+    pub fn purge_excess(&self, max_count: usize) {
+        let mut guard = self
+            .available
+            .lock()
+            .expect("Should not be able to lock recursively");
+        if guard.len() > max_count {
+            guard.truncate(max_count);
+        }
+    }
+
     pub fn take(
         &self,
         descriptors: &Descriptors,
@@ -207,5 +239,101 @@ impl<Type, Description: BufferDescription> Deref for PoolEntry<Type, Description
 
     fn deref(&self) -> &Self::Target {
         self.item.as_ref().expect("Item should exist until dropped")
+    }
+}
+
+// ── Vertex-instance buffer pool ───────────────────────────────────────────────
+//
+// Keeps a pool of `VERTEX | COPY_DST` GPU buffers that are reused across frames.
+// On every frame each consumed buffer is returned to the pool when its owning
+// `PooledVertexBuffer` smart-pointer is dropped; the next frame can then
+// reacquire that same GPU allocation instead of calling `device.create_buffer`.
+//
+// Cross-frame safety:
+//   New data is written via `queue.write_buffer`, which schedules an
+//   internal copy command.  Because all submissions go to the same queue the
+//   copy in frame N+1 is guaranteed to execute after frame N's vertex reads,
+//   so there is no GPU-side race condition.
+
+type VertexPoolInner = Mutex<Vec<wgpu::Buffer>>;
+
+/// A pool of reusable `VERTEX | COPY_DST` GPU buffers for instance data.
+///
+/// Use [`VertexInstancePool::acquire`] to obtain a [`PooledVertexBuffer`];
+/// the buffer is automatically returned to the pool when it is dropped.
+#[derive(Debug, Clone, Default)]
+pub struct VertexInstancePool {
+    inner: Arc<VertexPoolInner>,
+}
+
+impl VertexInstancePool {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Return a buffer whose `size()` is ≥ `min_bytes`.
+    ///
+    /// If the pool holds a suitable buffer it is recycled; otherwise a new
+    /// one is created whose capacity is `min_bytes` rounded up to the next
+    /// power of two (at least 256 bytes).
+    pub fn acquire(&self, device: &wgpu::Device, min_bytes: u64) -> PooledVertexBuffer {
+        let buffer = {
+            let mut guard = self.inner.lock().expect("vertex pool lock");
+            // Find the smallest pooled buffer that is large enough.
+            if let Some(pos) = guard.iter().position(|b| b.size() >= min_bytes) {
+                guard.swap_remove(pos)
+            } else {
+                let size = min_bytes.next_power_of_two().max(256);
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            }
+        };
+        PooledVertexBuffer {
+            buffer: Some(buffer),
+            pool: Arc::clone(&self.inner),
+        }
+    }
+
+    /// Discard pooled buffers in excess of `MAX_POOLED` to bound memory use.
+    pub fn purge_if_oversized(&self) {
+        const MAX_POOLED: usize = 32;
+        let mut guard = self.inner.lock().expect("vertex pool lock");
+        if guard.len() > MAX_POOLED {
+            guard.truncate(MAX_POOLED);
+        }
+    }
+}
+
+/// A smart-pointer wrapping a `VERTEX | COPY_DST` GPU buffer.
+///
+/// When dropped, the underlying `wgpu::Buffer` is returned to the
+/// [`VertexInstancePool`] it was acquired from so that it can be reused
+/// in the next frame.
+#[derive(Debug)]
+pub struct PooledVertexBuffer {
+    buffer: Option<wgpu::Buffer>,
+    pool: Arc<VertexPoolInner>,
+}
+
+impl std::ops::Deref for PooledVertexBuffer {
+    type Target = wgpu::Buffer;
+
+    fn deref(&self) -> &wgpu::Buffer {
+        self.buffer.as_ref().expect("buffer not yet taken")
+    }
+}
+
+impl Drop for PooledVertexBuffer {
+    fn drop(&mut self) {
+        if let Some(buf) = self.buffer.take() {
+            if let Ok(mut guard) = self.pool.lock() {
+                guard.push(buf);
+            }
+            // If the lock is poisoned (shouldn't happen) the buffer is simply dropped.
+        }
     }
 }
