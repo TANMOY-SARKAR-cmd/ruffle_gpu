@@ -33,6 +33,8 @@ pub struct Surface {
     pipelines: Arc<Pipelines>,
     format: wgpu::TextureFormat,
     actual_surface_format: wgpu::TextureFormat,
+    /// Total GPU draw calls issued during the most recent `draw_commands` call.
+    last_draw_call_count: u32,
 }
 
 impl Surface {
@@ -65,6 +67,7 @@ impl Surface {
             pipelines,
             format: frame_buffer_format,
             actual_surface_format: surface_format,
+            last_draw_call_count: 0,
         }
     }
 
@@ -141,6 +144,7 @@ impl Surface {
 
         let mut num_masks = 0;
         let mut mask_state = MaskState::NoMask;
+        let mut frame_draw_calls: u32 = 0;
         let chunks = chunk_blends(
             commands,
             descriptors,
@@ -205,6 +209,7 @@ impl Surface {
 
                     num_masks = renderer.num_masks();
                     mask_state = renderer.mask_state();
+                    frame_draw_calls += renderer.draw_call_count();
                 }
                 Chunk::Blend(texture, ChunkBlendMode::Shader(shader), needs_stencil) => {
                     assert!(
@@ -357,6 +362,7 @@ impl Surface {
         // If nothing happened, ensure it's cleared so we don't operate on garbage data
         target.ensure_cleared(draw_encoder);
 
+        self.last_draw_call_count = frame_draw_calls;
         target
     }
 
@@ -374,5 +380,10 @@ impl Surface {
 
     pub fn size(&self) -> wgpu::Extent3d {
         self.size
+    }
+
+    /// Total GPU `draw_indexed` calls from the most recent `draw_commands` call.
+    pub fn draw_call_count(&self) -> u32 {
+        self.last_draw_call_count
     }
 }

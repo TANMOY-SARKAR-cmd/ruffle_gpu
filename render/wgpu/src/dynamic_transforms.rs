@@ -2,7 +2,7 @@ use crate::Transforms;
 use crate::descriptors::Descriptors;
 use std::mem;
 
-const ESTIMATED_OBJECTS_PER_CHUNK: u64 = 4096;
+const ESTIMATED_OBJECTS_PER_CHUNK: u64 = 8192;
 
 pub struct DynamicTransforms {
     pub buffer: wgpu::Buffer,

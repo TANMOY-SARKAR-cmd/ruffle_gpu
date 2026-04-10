@@ -266,6 +266,10 @@ type VertexPoolInner = Mutex<Vec<wgpu::Buffer>>;
 #[derive(Debug, Clone, Default)]
 pub struct VertexInstancePool {
     inner: Arc<VertexPoolInner>,
+    /// Running count of new GPU buffer allocations this frame (i.e. cases
+    /// where no pooled buffer was available and a fresh one was created).
+    /// Read and reset via [`VertexInstancePool::take_alloc_count`].
+    alloc_count: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl VertexInstancePool {
@@ -293,6 +297,9 @@ impl VertexInstancePool {
                 guard.swap_remove(pos)
             } else {
                 let size = min_bytes.next_power_of_two().max(256);
+                // Count this as a new GPU allocation.
+                self.alloc_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: None,
                     size,
@@ -314,6 +321,15 @@ impl VertexInstancePool {
         if guard.len() > MAX_POOLED {
             guard.truncate(MAX_POOLED);
         }
+    }
+
+    /// Return the number of new GPU buffer allocations since the last call to
+    /// this method, and reset the counter to zero.
+    ///
+    /// Call once per frame (after submission) to track allocation pressure.
+    pub fn take_alloc_count(&self) -> u32 {
+        self.alloc_count
+            .swap(0, std::sync::atomic::Ordering::Relaxed)
     }
 }
 
