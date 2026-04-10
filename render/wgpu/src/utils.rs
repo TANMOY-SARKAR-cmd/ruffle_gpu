@@ -269,6 +269,96 @@ pub fn run_copy_pipeline(
     drop(render_pass);
 }
 
+/// Runs the GPU post-process pipeline for the final scene → swapchain step.
+///
+/// This replaces the plain `run_copy_pipeline` call in
+/// `Surface::draw_commands_and_copy_to`.  It is functionally identical to
+/// `run_copy_pipeline` except that it:
+///
+/// 1. Uses a **linear** (bilinear) sampler so that sub-pixel blending from
+///    FXAA is evaluated correctly.
+/// 2. Dispatches the `post_process_shader` / `post_process_srgb_shader`
+///    instead of the plain copy shader.  Those shaders apply FXAA,
+///    sharpening, and subtle colour correction in the fragment stage.
+///
+/// Only the final display copy is routed through this function.  Intermediate
+/// copies (e.g. bitmap-cache entries) continue to use `run_copy_pipeline` so
+/// that game-logic textures are never affected.
+#[expect(clippy::too_many_arguments)]
+pub fn run_post_process_pipeline(
+    descriptors: &Descriptors,
+    format: wgpu::TextureFormat,
+    actual_surface_format: wgpu::TextureFormat,
+    frame_view: &wgpu::TextureView,
+    input: &wgpu::TextureView,
+    whole_frame_bind_group: &wgpu::BindGroup,
+    globals: &Globals,
+    sample_count: u32,
+    encoder: &mut CommandEncoder,
+) {
+    // Linear sampler: enables correct bilinear interpolation for FXAA's
+    // sub-pixel blend and for the sharpening kernel neighbours.
+    let post_process_bind_group = descriptors
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &descriptors.bind_layouts.bitmap,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: descriptors.quad.texture_transforms.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(input),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    // Linear (bilinear) sampler – only for this display pass.
+                    resource: wgpu::BindingResource::Sampler(
+                        &descriptors.bitmap_samplers.clamp_linear,
+                    ),
+                },
+            ],
+            label: create_debug_label!("Post-process bind group").as_deref(),
+        });
+
+    let pipeline = if actual_surface_format == format {
+        descriptors.post_process_pipeline(format, sample_count)
+    } else {
+        descriptors.post_process_srgb_pipeline(actual_surface_format, sample_count)
+    };
+
+    let load = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
+
+    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: create_debug_label!("Post-process to render target").as_deref(),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: frame_view,
+            ops: wgpu::Operations {
+                load,
+                store: wgpu::StoreOp::Store,
+            },
+            resolve_target: None,
+            depth_slice: None,
+        })],
+        ..Default::default()
+    });
+
+    render_pass.set_pipeline(&pipeline);
+    render_pass.set_bind_group(0, globals.bind_group(), &[]);
+    render_pass.set_bind_group(1, whole_frame_bind_group, &[0]);
+    render_pass.set_bind_group(2, &post_process_bind_group, &[]);
+
+    render_pass.set_vertex_buffer(0, descriptors.quad.vertices_pos.slice(..));
+    render_pass.set_index_buffer(
+        descriptors.quad.indices.slice(..),
+        wgpu::IndexFormat::Uint32,
+    );
+
+    render_pass.draw_indexed(0..6, 0, 0..1);
+    drop(render_pass);
+}
+
 #[derive(Debug)]
 pub struct SampleCountMap<T> {
     one: T,
