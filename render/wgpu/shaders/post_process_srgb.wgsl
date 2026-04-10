@@ -1,5 +1,5 @@
-/// Post-processing shader (sRGB surface variant): bilinear sampling, FXAA,
-/// sharpen, colour correction, and sRGB conversion.
+/// Post-processing shader (sRGB surface variant, High quality): bilinear
+/// sampling, FXAA, sharpen, colour correction, and sRGB conversion.
 /// Applied as the final fullscreen pass when the internal render format and the
 /// swapchain surface format differ (e.g. Bgra8Unorm → Bgra8UnormSrgb).
 /// All post-processing steps are identical to post_process.wgsl; only the
@@ -56,6 +56,13 @@ fn fxaa(uv: vec2<f32>, px: vec2<f32>) -> vec4<f32> {
         return center;
     }
 
+    // Additional guard (Step 4): absolute minimum below which FXAA is skipped
+    // to preserve pixel art and flat UI sharpness.
+    let threshold_low = 0.03125; // 1/32
+    if luma_range < threshold_low {
+        return center;
+    }
+
     let lnw = luma(textureSample(src_texture, src_sampler, uv + vec2<f32>(-px.x, -px.y)).rgb);
     let lne = luma(textureSample(src_texture, src_sampler, uv + vec2<f32>( px.x, -px.y)).rgb);
     let lsw = luma(textureSample(src_texture, src_sampler, uv + vec2<f32>(-px.x,  px.y)).rgb);
@@ -93,7 +100,9 @@ fn sharpen(uv: vec2<f32>, px: vec2<f32>, aa_center: vec4<f32>) -> vec4<f32> {
     let e = textureSample(src_texture, src_sampler, uv + vec2<f32>( px.x,  0.0 ));
     let w = textureSample(src_texture, src_sampler, uv + vec2<f32>(-px.x,  0.0 ));
 
-    let sharpened = aa_center * 1.5 - (n + s + e + w) * 0.125;
+    // Safer kernel: centre × 1.25 − (N+S+E+W) × 0.0625
+    // Net weight = 1.25 − 4 × 0.0625 = 1.0 (energy-preserving; no clipping artifacts)
+    let sharpened = aa_center * 1.25 - (n + s + e + w) * 0.0625;
     return vec4<f32>(clamp(sharpened.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), aa_center.a);
 }
 
@@ -104,7 +113,8 @@ fn color_correct(c: vec4<f32>) -> vec4<f32> {
     if c.a > 0.0 {
         rgb = rgb / c.a;
     }
-    rgb = clamp((rgb - vec3<f32>(0.5)) * 1.05 + vec3<f32>(0.5), vec3<f32>(0.0), vec3<f32>(1.0));
+    // Contrast factor reduced 1.05 → 1.02 to avoid aggressive contrast boost
+    rgb = clamp((rgb - vec3<f32>(0.5)) * 1.02 + vec3<f32>(0.5), vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4<f32>(rgb * c.a, c.a);
 }
 
@@ -113,6 +123,24 @@ fn color_correct(c: vec4<f32>) -> vec4<f32> {
 @fragment
 fn main_fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let px = 1.0 / vec2<f32>(textureDimensions(src_texture));
+
+    // Early exit: detect flat regions (low luma variance) and skip both
+    // FXAA and sharpen entirely, reducing GPU cost on uniform areas (Step 7).
+    let center = textureSample(src_texture, src_sampler, in.uv);
+    let ln_pre = luma(textureSample(src_texture, src_sampler, in.uv + vec2<f32>( 0.0,  -px.y)).rgb);
+    let ls_pre = luma(textureSample(src_texture, src_sampler, in.uv + vec2<f32>( 0.0,   px.y)).rgb);
+    let le_pre = luma(textureSample(src_texture, src_sampler, in.uv + vec2<f32>( px.x,  0.0 )).rgb);
+    let lw_pre = luma(textureSample(src_texture, src_sampler, in.uv + vec2<f32>(-px.x,  0.0 )).rgb);
+    let lc_pre = luma(center.rgb);
+
+    let luma_max_pre = max(lc_pre, max(max(ln_pre, ls_pre), max(le_pre, lw_pre)));
+    let luma_range_pre = luma_max_pre - min(lc_pre, min(min(ln_pre, ls_pre), min(le_pre, lw_pre)));
+
+    let threshold_low = 0.03125; // 1/32
+    if luma_range_pre < threshold_low {
+        let corrected = color_correct(center);
+        return common__srgb_to_linear(corrected);
+    }
 
     // 1. FXAA
     let aa = fxaa(in.uv, px);

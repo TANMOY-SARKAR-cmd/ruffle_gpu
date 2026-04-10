@@ -63,6 +63,29 @@ pub fn raw_texture_as_texture(handle: &dyn RawTexture) -> &wgpu::Texture {
     <dyn Any>::downcast_ref(handle).unwrap()
 }
 
+/// Controls the quality of the final post-processing pass (scene → swapchain).
+///
+/// This only affects the last fullscreen copy; intermediate render passes and
+/// ActionScript execution are never touched.
+///
+/// | Mode  | Sampler  | FXAA | Sharpen | Colour correction |
+/// |-------|----------|------|---------|-------------------|
+/// | `Off` | Nearest  | —    | —       | —                 |
+/// | `Low` | Linear   | —    | —       | —                 |
+/// | `High`| Linear   | ✓    | ✓       | ✓                 |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PostProcessQuality {
+    /// Plain nearest-neighbour copy — identical to the original pipeline.
+    /// Pixel art and UI remain perfectly sharp; no GPU overhead.
+    Off,
+    /// Bilinear copy only — no FXAA, no sharpening, no colour correction.
+    /// Smooth scaling without edge processing.
+    Low,
+    /// Full pipeline: bilinear sampling, FXAA, sharpening, colour correction.
+    #[default]
+    High,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum MaskState {
     NoMask,
