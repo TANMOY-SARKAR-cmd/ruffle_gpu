@@ -228,15 +228,17 @@ impl FrameMetrics {
     }
 
     /// Current batch-size limit for `DrawRectInstanced` batches.
-    /// Always in `[MIN_BATCH_LIMIT, MAX_BATCH_LIMIT]`.
+    /// Adaptive adjustment is disabled; always returns `MAX_BATCH_LIMIT` to
+    /// eliminate timing non-determinism caused by EMA/lerp/cooldown logic.
     fn rect_batch_limit(&self) -> usize {
-        self.rect_batch_limit
+        MAX_BATCH_LIMIT
     }
 
     /// Current batch-size limit for `DrawBitmapInstanced` batches.
-    /// Always in `[MIN_BATCH_LIMIT, MAX_BATCH_LIMIT]`.
+    /// Adaptive adjustment is disabled; always returns `MAX_BATCH_LIMIT` to
+    /// eliminate timing non-determinism caused by EMA/lerp/cooldown logic.
     fn bitmap_batch_limit(&self) -> usize {
-        self.bitmap_batch_limit
+        MAX_BATCH_LIMIT
     }
 }
 
