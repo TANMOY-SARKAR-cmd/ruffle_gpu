@@ -1,5 +1,5 @@
-/// Post-processing shader (sRGB surface variant): bilinear sampling, sharpen,
-/// FXAA, colour correction, and sRGB conversion.
+/// Post-processing shader (sRGB surface variant): bilinear sampling, FXAA,
+/// sharpen, colour correction, and sRGB conversion.
 /// Applied as the final fullscreen pass when the internal render format and the
 /// swapchain surface format differ (e.g. Bgra8Unorm → Bgra8UnormSrgb).
 /// All post-processing steps are identical to post_process.wgsl; only the

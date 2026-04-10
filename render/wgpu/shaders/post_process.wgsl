@@ -1,4 +1,4 @@
-/// Post-processing shader: bilinear sampling, sharpen, FXAA, and colour correction.
+/// Post-processing shader: bilinear sampling, FXAA, sharpen, and colour correction.
 /// Applied as the final fullscreen pass (offscreen scene texture → swapchain).
 /// The internal texture format equals the surface format, so no sRGB conversion
 /// is performed here (see post_process_srgb.wgsl for the sRGB variant).
