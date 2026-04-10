@@ -640,6 +640,9 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
         self.viewport_scale_factor = dimensions.scale_factor;
         self.texture_pool = TexturePool::new();
+        // Reset the offscreen pool too – stale textures from the old size/format
+        // would never be reused and would waste GPU memory.
+        self.offscreen_texture_pool = TexturePool::new();
     }
 
     fn create_context3d(
@@ -857,7 +860,14 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
         self.active_frame
             .submit_for_target(&self.descriptors, &self.target, frame_output);
-        self.offscreen_texture_pool = TexturePool::new();
+        // Trim the offscreen texture pool rather than clearing it entirely:
+        // keeping textures alive lets the next frame reuse GPU allocations
+        // instead of creating new ones every frame.
+        self.offscreen_texture_pool.purge_if_oversized();
+        // Trim the per-frame vertex-instance buffer pool.
+        self.descriptors.vertex_instance_pool.purge_if_oversized();
+        // Trim the gradient texture cache to prevent unbounded VRAM growth.
+        self.descriptors.purge_gradient_cache_if_oversized();
 
         // ── Update adaptive metrics after the frame has been submitted ────────
         self.frame_metrics.end_frame(frame_start);

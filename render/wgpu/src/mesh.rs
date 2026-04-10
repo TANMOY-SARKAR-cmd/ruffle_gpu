@@ -354,25 +354,53 @@ impl CommonGradient {
 
             colors
         };
-        let texture = descriptors.device.create_texture_with_data(
-            &descriptors.queue,
-            &wgpu::TextureDescriptor {
-                label: None,
-                size: wgpu::Extent3d {
-                    width: GRADIENT_SIZE as u32,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &colors[..],
-        );
+        let cache_key = (gradient.interpolation, gradient.records.clone());
+        // Double-checked locking: hold the lock only for map operations so that
+        // the (potentially slow) GPU texture allocation + upload happens outside
+        // the critical section.
+        let texture = {
+            // Fast path: key already present.
+            let existing = descriptors
+                .gradient_texture_cache
+                .lock()
+                .expect("gradient_texture_cache lock poisoned")
+                .get(&cache_key)
+                .cloned();
+            match existing {
+                Some(tex) => tex,
+                None => {
+                    // Slow path: create the texture without holding the lock.
+                    let new_tex = descriptors.device.create_texture_with_data(
+                        &descriptors.queue,
+                        &wgpu::TextureDescriptor {
+                            label: None,
+                            size: wgpu::Extent3d {
+                                width: GRADIENT_SIZE as u32,
+                                height: 1,
+                                depth_or_array_layers: 1,
+                            },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                            view_formats: &[],
+                        },
+                        wgpu::util::TextureDataOrder::LayerMajor,
+                        &colors[..],
+                    );
+                    // Re-acquire lock and insert only if still vacant (another
+                    // thread may have inserted concurrently).
+                    descriptors
+                        .gradient_texture_cache
+                        .lock()
+                        .expect("gradient_texture_cache lock poisoned")
+                        .entry(cache_key)
+                        .or_insert(new_tex)
+                        .clone()
+                }
+            }
+        };
         let view = texture.create_view(&Default::default());
 
         let buffer_offset = uniform_buffers

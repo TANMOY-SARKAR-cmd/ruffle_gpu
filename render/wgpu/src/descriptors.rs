@@ -6,10 +6,17 @@ use crate::{
     BitmapSamplers, Pipelines, PosColorVertex, PosVertex, TextureTransforms,
     create_buffer_with_data,
 };
+use crate::buffer_pool::VertexInstancePool;
 use fnv::FnvHashMap;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
+use swf::{GradientInterpolation, GradientRecord};
 use wgpu::Backend;
+
+/// Cache key for gradient textures: determined solely by the colour-stop data
+/// and interpolation mode (the two inputs that decide pixel content).
+type GradientCacheKey = (GradientInterpolation, Vec<GradientRecord>);
 
 pub struct Descriptors {
     pub wgpu_instance: wgpu::Instance,
@@ -30,6 +37,20 @@ pub struct Descriptors {
     pub shaders: Shaders,
     pipelines: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), Arc<Pipelines>>>,
     pub filters: Filters,
+    /// Pool of reusable `VERTEX | COPY_DST` buffers for per-frame instance data.
+    /// Shared across all rendering paths via `Descriptors`; thread-safe
+    /// through the pool's internal `Mutex`.
+    pub vertex_instance_pool: VertexInstancePool,
+    /// Cache of gradient textures keyed by `(interpolation, records)`.
+    ///
+    /// Many SWF shapes reference the same gradient definition.  Creating
+    /// a 256×1 RGBA texture per shape is wasteful; this cache lets all shapes
+    /// with identical colour stops share a single GPU texture allocation.
+    /// `wgpu::Texture` is cheaply cloneable (internally Arc-backed).
+    ///
+    /// The cache is bounded by [`Self::purge_gradient_cache_if_oversized`],
+    /// which is called at the end of every frame.
+    pub(crate) gradient_texture_cache: Mutex<HashMap<GradientCacheKey, wgpu::Texture>>,
 }
 
 impl Debug for Descriptors {
@@ -70,6 +91,25 @@ impl Descriptors {
             shaders,
             pipelines: Default::default(),
             filters,
+            vertex_instance_pool: VertexInstancePool::new(),
+            gradient_texture_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Evict the gradient texture cache once it grows beyond `MAX_ENTRIES`.
+    ///
+    /// Each entry is a 256×1 RGBA8 texture (≈ 1 KiB GPU memory).  The cap
+    /// keeps worst-case VRAM usage bounded at roughly `MAX_ENTRIES` KiB while
+    /// still achieving good reuse across typical SWF content (which tends to
+    /// reuse a small number of gradient definitions).
+    pub fn purge_gradient_cache_if_oversized(&self) {
+        const MAX_ENTRIES: usize = 256;
+        let mut cache = self
+            .gradient_texture_cache
+            .lock()
+            .expect("gradient_texture_cache lock poisoned");
+        if cache.len() > MAX_ENTRIES {
+            cache.clear();
         }
     }
 

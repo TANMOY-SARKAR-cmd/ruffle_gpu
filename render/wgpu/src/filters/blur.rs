@@ -8,7 +8,7 @@ use bytemuck::{Pod, Zeroable};
 use std::sync::OnceLock;
 use swf::BlurFilter as BlurFilterArgs;
 use wgpu::util::StagingBelt;
-use wgpu::{BufferSlice, CommandEncoder, RenderPipeline, TextureView};
+use wgpu::{BufferSlice, CommandEncoder, RenderPipeline};
 
 /// This is a 1:1 match of `struct Filter` in `blur.wgsl`. See that, and the usage below, for more info.
 /// Since WebGL requires 16 byte struct size (alignment), some of these fields (namely m2 and last_weight)
@@ -197,6 +197,13 @@ impl BlurFilter {
             .copy_from_slice(bytemuck::cast_slice(&[source.vertices()]));
 
         let source_view = source.texture.create_view(&Default::default());
+        // Cache bind groups by source texture-view pointer.  Within a single
+        // `apply` call there are at most three distinct source views
+        // (the original source and up to two pool textures used alternately),
+        // so a small Vec with linear search is more than sufficient.
+        let mut bind_group_cache: Vec<(*const wgpu::TextureView, wgpu::BindGroup)> =
+            Vec::with_capacity(3);
+
         let mut first = true;
         for _ in 0..(filter.num_passes() as usize) {
             for i in 0..2 {
@@ -279,12 +286,48 @@ impl BlurFilter {
                     )
                     .copy_from_slice(bytemuck::cast_slice(&[uniform]));
 
-                self.render_with_uniform_buffers(
+                // Look up (or create) the bind group for this source texture view.
+                // The bind group holds a reference to the GPU texture object, not
+                // its contents, so it is safe to reuse even after the uniform
+                // buffer has been updated.
+                let view_ptr = previous_view as *const wgpu::TextureView;
+                let filter_group = if let Some((_, bg)) =
+                    bind_group_cache.iter().find(|(p, _)| *p == view_ptr)
+                {
+                    bg
+                } else {
+                    let bg = descriptors
+                        .device
+                        .create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: create_debug_label!("Filter group").as_deref(),
+                            layout: &self.bind_group_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(previous_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        descriptors.bitmap_samplers.get_sampler(false, true),
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: self.uniform_buffer.as_entire_binding(),
+                                },
+                            ],
+                        });
+                    bind_group_cache.push((view_ptr, bg));
+                    &bind_group_cache.last().unwrap().1
+                };
+
+                self.render_with_bind_group(
                     descriptors,
                     draw_encoder,
                     pipeline,
                     &mut flop,
-                    previous_view,
+                    filter_group,
                     previous_vertices,
                 );
 
@@ -300,38 +343,15 @@ impl BlurFilter {
         }
     }
 
-    fn render_with_uniform_buffers(
+    fn render_with_bind_group(
         &self,
         descriptors: &Descriptors,
         draw_encoder: &mut CommandEncoder,
         pipeline: &RenderPipeline,
         destination: &mut CommandTarget,
-        source: &TextureView,
+        filter_group: &wgpu::BindGroup,
         vertices: BufferSlice,
     ) {
-        let filter_group = descriptors
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: create_debug_label!("Filter group").as_deref(),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(source),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(
-                            descriptors.bitmap_samplers.get_sampler(false, true),
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.uniform_buffer.as_entire_binding(),
-                    },
-                ],
-            });
-
         let mut render_pass = draw_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: create_debug_label!("Blur filter").as_deref(),
             color_attachments: &[destination.color_attachments()],
@@ -339,7 +359,7 @@ impl BlurFilter {
         });
         render_pass.set_pipeline(pipeline);
 
-        render_pass.set_bind_group(0, &filter_group, &[]);
+        render_pass.set_bind_group(0, filter_group, &[]);
 
         render_pass.set_vertex_buffer(0, vertices);
         render_pass.set_index_buffer(
