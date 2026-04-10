@@ -355,15 +355,22 @@ impl CommonGradient {
             colors
         };
         let cache_key = (gradient.interpolation, gradient.records.clone());
+        // Double-checked locking: hold the lock only for map operations so that
+        // the (potentially slow) GPU texture allocation + upload happens outside
+        // the critical section.
         let texture = {
-            let mut cache = descriptors
+            // Fast path: key already present.
+            let existing = descriptors
                 .gradient_texture_cache
                 .lock()
-                .expect("gradient_texture_cache lock poisoned");
-            cache
-                .entry(cache_key)
-                .or_insert_with(|| {
-                    descriptors.device.create_texture_with_data(
+                .expect("gradient_texture_cache lock poisoned")
+                .get(&cache_key)
+                .cloned();
+            match existing {
+                Some(tex) => tex,
+                None => {
+                    // Slow path: create the texture without holding the lock.
+                    let new_tex = descriptors.device.create_texture_with_data(
                         &descriptors.queue,
                         &wgpu::TextureDescriptor {
                             label: None,
@@ -381,9 +388,18 @@ impl CommonGradient {
                         },
                         wgpu::util::TextureDataOrder::LayerMajor,
                         &colors[..],
-                    )
-                })
-                .clone()
+                    );
+                    // Re-acquire lock and insert only if still vacant (another
+                    // thread may have inserted concurrently).
+                    descriptors
+                        .gradient_texture_cache
+                        .lock()
+                        .expect("gradient_texture_cache lock poisoned")
+                        .entry(cache_key)
+                        .or_insert(new_tex)
+                        .clone()
+                }
+            }
         };
         let view = texture.create_view(&Default::default());
 
