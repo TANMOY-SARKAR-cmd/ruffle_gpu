@@ -56,8 +56,8 @@ pub fn add_callback<'gc>(
             .add_callback(name.to_string(), Callback::Avm2 { method });
     } else {
         // Flash Player silently ignores null-callback removal for names that
-        // were never registered; `HashMap::remove` returns None in that case
-        // which is the correct no-op behaviour.
+        // were never registered; removing a missing callback is a no-op,
+        // which matches the desired behaviour here.
         activation
             .context
             .external_interface
