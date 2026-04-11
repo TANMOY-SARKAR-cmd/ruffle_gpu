@@ -33,7 +33,7 @@ use std::any::Any;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
 use swf::Color;
 use tracing::instrument;
@@ -83,6 +83,174 @@ const LERP_STEP_UP: f64 = 0.10;
 /// transient start-up noise to subside.
 const WARMUP_FRAMES: u64 = 8;
 
+// ── GPU timestamp profiling ───────────────────────────────────────────────────
+//
+// When the device supports `TIMESTAMP_QUERY`, each frame writes a pair of
+// timestamps (slot 0 = before drawing, slot 1 = after drawing) into a
+// `QuerySet`.  After submission the resolved 64-bit tick values are copied
+// into a host-visible staging buffer via `resolve_query_set` +
+// `copy_buffer_to_buffer`.  The staging buffer is then mapped asynchronously;
+// the result is read at the *start* of the next frame (by then the GPU has
+// almost always finished and `device.poll(Poll)` can trigger the callback
+// without stalling).
+//
+// This is non-blocking: if the GPU result is not yet ready when the next frame
+// starts, the read is skipped and the previous `last_gpu_ms` value is retained.
+//
+// Rendering output and determinism are completely unaffected — timestamp writes
+// are transparent probes that do not alter draw commands or their ordering.
+
+/// Per-frame GPU timestamp state.
+///
+/// Created once during `WgpuRenderBackend::new` when the device has the
+/// `TIMESTAMP_QUERY` feature; absent (`None`) on platforms that do not support
+/// it (WebGL2, older Vulkan drivers).
+struct GpuTimingState {
+    /// Two-slot query set: slot 0 = frame start, slot 1 = frame end.
+    query_set: wgpu::QuerySet,
+    /// Resolved u64 ticks are written here by `resolve_query_set`.
+    /// Usage: `QUERY_RESOLVE | COPY_SRC`.
+    resolve_buffer: wgpu::Buffer,
+    /// CPU-visible copy of `resolve_buffer`.
+    /// Usage: `COPY_DST | MAP_READ`.
+    map_buffer: wgpu::Buffer,
+    /// GPU ticks → nanoseconds conversion factor, from `queue.get_timestamp_period()`.
+    timestamp_period: f32,
+    /// Channel receiver for the in-flight `map_async` result.
+    /// `None` when the buffer is idle (safe to arm for the next frame).
+    /// `Some(rx)` while a map is in progress (must not reuse `map_buffer`).
+    pending: Option<mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
+}
+
+impl GpuTimingState {
+    /// Create GPU timing state if `TIMESTAMP_QUERY` is supported.
+    fn new_if_supported(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Option<Self> {
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return None;
+        }
+        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("frame_timestamp_query_set"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        });
+        // 2 × u64 = 16 bytes
+        let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("timestamp_resolve_buffer"),
+            size: 16,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("timestamp_map_buffer"),
+            size: 16,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        Some(Self {
+            query_set,
+            resolve_buffer,
+            map_buffer,
+            timestamp_period: queue.get_timestamp_period(),
+            pending: None,
+        })
+    }
+
+    /// Try to read the result of the previous frame's `map_async`.
+    ///
+    /// Returns the GPU elapsed time in milliseconds if the result was ready,
+    /// or `None` if the GPU hasn't finished yet (or no read was in flight).
+    ///
+    /// After a successful read the staging buffer is unmapped and
+    /// `self.pending` is cleared so the buffer can be reused this frame.
+    fn try_read_result(&mut self, device: &wgpu::Device) -> Option<f64> {
+        let rx = self.pending.as_ref()?;
+        // Non-blocking poll — fires the map_async callback if the GPU is done.
+        let _ = device.poll(wgpu::PollType::Poll);
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                // Mapping succeeded: read the two 64-bit tick counts.
+                let range = self.map_buffer.slice(..).get_mapped_range();
+                let ticks: [u64; 2] = {
+                    let bytes: &[u8] = &range;
+                    // Safety: both values are plain u64, guaranteed aligned to
+                    // 8 bytes by the wgpu buffer allocator.
+                    [
+                        u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                        u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                    ]
+                };
+                drop(range);
+                self.map_buffer.unmap();
+                self.pending = None;
+                let elapsed_ticks = ticks[1].wrapping_sub(ticks[0]);
+                // timestamp_period is nanoseconds per tick.
+                let gpu_ms =
+                    elapsed_ticks as f64 * self.timestamp_period as f64 / 1_000_000.0;
+                Some(gpu_ms)
+            }
+            Ok(Err(_)) => {
+                // Mapping error (device lost etc.) — give up on this read.
+                self.pending = None;
+                None
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                // GPU not done yet — keep pending, skip this frame.
+                None
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending = None;
+                None
+            }
+        }
+    }
+
+    /// Insert timestamp writes + resolve + copy into `encoder`.
+    ///
+    /// Writes slot 0 at the start (before any draw commands) and slot 1 at
+    /// the end (after all draw commands and `staging_belt.finish()`).
+    /// Call `write_start(encoder)` at the start and `write_end_and_resolve(encoder)`
+    /// at the end.  Both calls are no-ops if the buffer is still in use from
+    /// a previous frame.
+    ///
+    /// Returns `true` if timestamps were written (so the caller should arm
+    /// the map_async after submission).
+    fn write_start(&self, encoder: &mut wgpu::CommandEncoder) -> bool {
+        if self.pending.is_some() {
+            // Previous frame's staging buffer is still mapped — skip.
+            return false;
+        }
+        encoder.write_timestamp(&self.query_set, 0);
+        true
+    }
+
+    /// Write the end timestamp + resolve into `resolve_buffer` + copy to
+    /// `map_buffer`.  Must only be called if `write_start` returned `true`.
+    fn write_end_and_resolve(&self, encoder: &mut wgpu::CommandEncoder) {
+        encoder.write_timestamp(&self.query_set, 1);
+        encoder.resolve_query_set(&self.query_set, 0..2, &self.resolve_buffer, 0);
+        encoder.copy_buffer_to_buffer(&self.resolve_buffer, 0, &self.map_buffer, 0, 16);
+    }
+
+    /// Arm the non-blocking readback for the frame that was just submitted.
+    ///
+    /// Calls `map_async` on the staging buffer and stores the receiver.
+    /// A subsequent `device.poll(Poll)` (triggered at the start of the next
+    /// frame by `try_read_result`) will fire the callback when the GPU finishes.
+    fn arm_readback(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        self.map_buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                // Ignore send errors — receiver may have been dropped if the
+                // backend is shut down before this callback fires.
+                let _ = tx.send(result);
+            });
+        self.pending = Some(rx);
+    }
+}
 /// Lightweight adaptive performance tracker.
 ///
 /// Measures wall-clock time between consecutive `submit_frame` calls, maintains
@@ -91,13 +259,11 @@ const WARMUP_FRAMES: u64 = 8;
 ///
 /// # Timing breakdown
 ///
-/// Two separate measurements are tracked:
+/// Three separate measurements are tracked:
 /// * `encode_ms` — time to build and encode all GPU commands (CPU-bound work).
 /// * `smoothed_ms` — EMA-smoothed total frame duration (encode + submit + present).
-///
-/// The encode/submit split helps distinguish CPU bottlenecks (high `encode_ms`)
-/// from GPU / driver bottlenecks (high `total - encode`), without requiring
-/// GPU timestamp query support.
+/// * `last_gpu_ms` — actual GPU execution time from hardware timestamp queries
+///   (updated once per frame with 1-frame latency; zero until first reading).
 ///
 /// # Safety guarantees
 /// * The batch limits only change *how many* instances are packed into a single
@@ -118,6 +284,10 @@ struct FrameMetrics {
     /// Covers command building, staging-belt work, and `chunk_blends` but
     /// excludes `queue.submit` and driver/GPU work.
     last_encode_ms: f64,
+    /// GPU execution time for the most recently completed frame, in milliseconds.
+    /// Derived from hardware timestamp queries; updated once per frame with
+    /// one frame of latency.  Zero until the first successful readback.
+    last_gpu_ms: f64,
     /// Current adaptive batch limit for `DrawRectInstanced` batches.
     rect_batch_limit: usize,
     /// Current adaptive batch limit for `DrawBitmapInstanced` batches.
@@ -143,6 +313,7 @@ impl FrameMetrics {
             smoothed_ms: 16.67, // start assuming 60 FPS
             last_raw_ms: 16.67,
             last_encode_ms: 0.0,
+            last_gpu_ms: 0.0,
             rect_batch_limit: MAX_BATCH_LIMIT,
             bitmap_batch_limit: MAX_BATCH_LIMIT,
             frame_index: 0,
@@ -302,6 +473,20 @@ impl FrameMetrics {
         self.last_encode_ms
     }
 
+    /// GPU execution time for the most recently read timestamp pair (ms).
+    ///
+    /// Updated once per frame with one frame of latency when `TIMESTAMP_QUERY`
+    /// is supported.  Returns `0.0` until the first successful readback or on
+    /// platforms that do not support timestamp queries.
+    fn gpu_time_ms(&self) -> f64 {
+        self.last_gpu_ms
+    }
+
+    /// Update the GPU time metric.  Call after a successful timestamp readback.
+    fn set_gpu_time_ms(&mut self, ms: f64) {
+        self.last_gpu_ms = ms;
+    }
+
     /// Record per-frame statistics (draw calls and new buffer allocations).
     /// Call once per frame after all rendering has completed.
     fn record_frame_stats(&mut self, draw_calls: u32, allocs: u32) {
@@ -320,16 +505,10 @@ impl FrameMetrics {
     }
 }
 
-// GPU-side timing is not used as a secondary signal for batch-limit control.
-//
-// `wgpu::Queue::submit` returns a `SubmissionIndex` but does not expose
-// queue depth, fence latency, or elapsed GPU time.  Obtaining those would
-// require enabling the `TIMESTAMP_QUERY` / `TIMESTAMP_QUERY_INSIDE_PASSES`
-// device features and wiring up a query-set pipeline — neither of which is
-// set up here.  Calling `Device::poll` synchronously in the render hot-path
-// to approximate GPU completion time would stall the CPU thread and negate
-// any benefit.  Wall-clock frame time (the EMA tracked above) is therefore
-// the sole signal used to drive the controller.
+// GPU-side timing is now implemented via `GpuTimingState` (above).
+// Wall-clock frame time (EMA) is kept as the primary signal for the adaptive
+// batch-limit controller because it is available on all platforms; GPU
+// timestamps supplement it with direct GPU execution time when supported.
 
 /// Creates a wgpu instance with Ruffle's required configuration.
 ///
@@ -373,6 +552,11 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     /// time and derives a batch-size limit that is threaded through the rendering
     /// pipeline.  Has no effect on game logic or ActionScript execution.
     frame_metrics: FrameMetrics,
+    /// Optional GPU timestamp profiler.  Present when the device supports
+    /// `TIMESTAMP_QUERY`; absent on WebGL2 / older Vulkan drivers.
+    /// Measures actual GPU execution time per frame (not wall-clock time) by
+    /// inserting a before/after timestamp pair around the frame's command buffer.
+    gpu_timing: Option<GpuTimingState>,
 }
 
 impl WgpuRenderBackend<SwapChainTarget> {
@@ -533,6 +717,10 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
 
         let transforms = DynamicTransforms::new(&descriptors);
         let active_frame = ActiveFrame::new(&descriptors);
+        let gpu_timing = GpuTimingState::new_if_supported(
+            &descriptors.device,
+            &descriptors.queue,
+        );
 
         Ok(Self {
             descriptors,
@@ -547,6 +735,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             dynamic_transforms: transforms,
             active_frame,
             frame_metrics: FrameMetrics::new(),
+            gpu_timing,
         })
     }
 
@@ -768,12 +957,19 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             "Encode time (CPU): {:.2} ms",
             self.frame_metrics.encode_time_ms()
         ));
-        let has_ts = self.descriptors.device.features()
-            .contains(wgpu::Features::TIMESTAMP_QUERY);
-        result.push(format!(
-            "GPU timestamp queries: {}",
-            if has_ts { "available" } else { "unavailable" }
-        ));
+        // GPU time from hardware timestamp queries (1-frame latency).
+        // Shows "N/A" when the device doesn't support TIMESTAMP_QUERY or before
+        // the first successful readback.
+        if self.gpu_timing.is_some() {
+            let gpu_ms = self.frame_metrics.gpu_time_ms();
+            if gpu_ms > 0.0 {
+                result.push(format!("GPU time (ms): {gpu_ms:.2}"));
+            } else {
+                result.push("GPU time (ms): pending".to_string());
+            }
+        } else {
+            result.push("GPU time (ms): N/A (TIMESTAMP_QUERY not supported)".to_string());
+        }
         result.push(format!(
             "Draw calls (scene): {}",
             self.frame_metrics.draw_call_count()
@@ -842,6 +1038,27 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         let frame_start = self.frame_metrics.begin_frame();
         let rect_batch_limit = self.frame_metrics.rect_batch_limit();
         let bitmap_batch_limit = self.frame_metrics.bitmap_batch_limit();
+
+        // ── GPU timestamp: try to read previous frame's result ────────────────
+        // Try a non-blocking poll so that the map_async callback from the
+        // *previous* frame can fire.  If the GPU finished in time, read and
+        // store the elapsed ticks; otherwise keep the last value.
+        if let Some(ref mut timer) = self.gpu_timing {
+            if let Some(gpu_ms) = timer.try_read_result(&self.descriptors.device) {
+                self.frame_metrics.set_gpu_time_ms(gpu_ms);
+            }
+        }
+
+        // ── GPU timestamp: slot 0 — before drawing ────────────────────────────
+        // `write_start` returns false if the previous frame's staging buffer is
+        // still mapped (rare: means the GPU didn't finish within one frame).
+        // In that case we skip timestamps for this frame to avoid reusing the
+        // buffer while it's in a mapped state.
+        let timestamps_written = self
+            .gpu_timing
+            .as_ref()
+            .map(|t| t.write_start(&mut self.active_frame.command_encoder))
+            .unwrap_or(false);
 
         let frame_output = match self.target.get_next_texture() {
             Ok(frame) => frame,
@@ -968,6 +1185,17 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         );
         self.active_frame.staging_belt.finish();
 
+        // ── GPU timestamp: slot 1 — after drawing, resolve + copy ─────────────
+        // Must happen after `staging_belt.finish()` (which finalises the
+        // staging upload commands) so that slot 1 encompasses all GPU work
+        // submitted this frame.  The resolve and copy are part of the same
+        // command buffer and are therefore ordered after all draw commands.
+        if timestamps_written {
+            if let Some(ref timer) = self.gpu_timing {
+                timer.write_end_and_resolve(&mut self.active_frame.command_encoder);
+            }
+        }
+
         // ── Record CPU encoding time ─────────────────────────────────────────
         // Capture the timestamp just before we hand command buffers to the
         // driver so `encode_ms` reflects pure CPU encoding cost and not
@@ -976,6 +1204,17 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
         self.active_frame
             .submit_for_target(&self.descriptors, &self.target, frame_output);
+
+        // ── GPU timestamp: arm non-blocking readback ──────────────────────────
+        // After submission the GPU will eventually complete the timestamp resolve
+        // and copy.  We arm a map_async so that the next frame can read the result
+        // non-blockingly via `try_read_result`.
+        if timestamps_written {
+            if let Some(ref mut timer) = self.gpu_timing {
+                timer.arm_readback();
+            }
+        }
+
         // Trim the offscreen texture pool rather than clearing it entirely:
         // keeping textures alive lets the next frame reuse GPU allocations
         // instead of creating new ones every frame.
