@@ -115,8 +115,10 @@ struct FrameMetrics {
     /// the very first pressure signal is acted on without delay.
     last_adjust_frame: Option<u64>,
     /// GPU draw calls (`draw_indexed`) issued during the most recent frame.
+    /// Covers scene-rendering passes (Chunk::Draw, Complex blend, Shader blend)
+    /// but excludes post-process copy passes.
     draw_call_count: u32,
-    /// New GPU vertex buffer allocations during the most recent frame.
+    /// New GPU vertex-instance buffer allocations during the most recent frame.
     buffer_alloc_count: u32,
 }
 
@@ -724,15 +726,15 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             self.frame_metrics.fps()
         ));
         result.push(format!(
-            "Frame time: {:.2} ms",
+            "Frame time (avg): {:.2} ms",
             self.frame_metrics.frame_time_ms()
         ));
         result.push(format!(
-            "Draw calls: {}",
+            "Draw calls (scene): {}",
             self.frame_metrics.draw_call_count()
         ));
         result.push(format!(
-            "Buffer allocs: {}",
+            "Instance buf allocs: {}",
             self.frame_metrics.buffer_alloc_count()
         ));
 

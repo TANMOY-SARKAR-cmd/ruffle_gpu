@@ -245,6 +245,8 @@ impl Surface {
                         &FilterSource::for_entire_texture(texture.texture()),
                     )
                     .expect("Failed to run PixelBender blend mode");
+                    // run_pixelbender_shader_impl issues one draw_indexed call internally.
+                    frame_draw_calls += 1;
                 }
                 Chunk::Blend(texture, ChunkBlendMode::Complex(blend_mode), needs_stencil) => {
                     let parent = match blend_mode {
@@ -355,6 +357,7 @@ impl Surface {
                     );
 
                     render_pass.draw_indexed(0..6, 0, 0..1);
+                    frame_draw_calls += 1;
                 }
             }
         }
@@ -383,6 +386,9 @@ impl Surface {
     }
 
     /// Total GPU `draw_indexed` calls from the most recent `draw_commands` call.
+    /// Includes calls from `Chunk::Draw` (via `CommandRenderer`), `Chunk::Blend(Complex)`,
+    /// and `Chunk::Blend(Shader)` passes.  Post-process copy passes (e.g. the MSAA
+    /// resolve/copy in `draw_commands_and_copy_to`) are not included.
     pub fn draw_call_count(&self) -> u32 {
         self.last_draw_call_count
     }
