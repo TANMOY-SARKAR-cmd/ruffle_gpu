@@ -239,18 +239,24 @@ impl FrameMetrics {
         }
     }
 
-    /// Current adaptive batch-size limit for `DrawRectInstanced` batches.
-    /// Starts at `MAX_BATCH_LIMIT` and is adjusted each frame by `end_frame`
-    /// based on the EMA frame time.
+    /// Returns the rect instanced batch-size limit used by the renderer.
+    ///
+    /// Adaptive batch limits are disabled for determinism. `FrameMetrics` is
+    /// used for monitoring only — the EMA/lerp/cooldown logic in `end_frame`
+    /// still runs and updates `self.rect_batch_limit`, but the stored value is
+    /// not consulted here so rendering output is unaffected by load variance.
     fn rect_batch_limit(&self) -> usize {
-        self.rect_batch_limit
+        MAX_BATCH_LIMIT
     }
 
-    /// Current adaptive batch-size limit for `DrawBitmapInstanced` batches.
-    /// Starts at `MAX_BATCH_LIMIT` and is adjusted each frame by `end_frame`
-    /// based on the EMA frame time.
+    /// Returns the bitmap instanced batch-size limit used by the renderer.
+    ///
+    /// Adaptive batch limits are disabled for determinism. `FrameMetrics` is
+    /// used for monitoring only — the EMA/lerp/cooldown logic in `end_frame`
+    /// still runs and updates `self.bitmap_batch_limit`, but the stored value
+    /// is not consulted here so rendering output is unaffected by load variance.
     fn bitmap_batch_limit(&self) -> usize {
-        self.bitmap_batch_limit
+        MAX_BATCH_LIMIT
     }
 
     /// Estimated frames per second based on the smoothed frame time.
