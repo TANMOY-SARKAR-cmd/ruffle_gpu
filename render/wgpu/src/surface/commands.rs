@@ -1328,7 +1328,12 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             );
         }
 
-        // The instanced bitmap pipeline always uses normal (premultiplied-alpha) blending.
+        // Individual bitmap draws are always composited with premultiplied-alpha
+        // (Normal) blending.  Non-Normal blend modes are applied at the display-
+        // object layer through the `blend()` command, which renders content into
+        // a temporary sub-surface and composites it with the requested mode.
+        // The CommandHandler::render_bitmap trait method therefore carries no
+        // blend_mode parameter; using Normal here is architecturally correct.
         let blend_mode = TrivialBlend::Normal;
 
         // Flush the bitmap batch if the batch key changes (different texture,

@@ -77,12 +77,12 @@ pub fn raw_texture_as_texture(handle: &dyn RawTexture) -> &wgpu::Texture {
 pub enum PostProcessQuality {
     /// Plain nearest-neighbour copy — identical to the original pipeline.
     /// Pixel art and UI remain perfectly sharp; no GPU overhead.
+    #[default]
     Off,
     /// Bilinear copy only — no FXAA, no sharpening, no colour correction.
     /// Smooth scaling without edge processing.
     Low,
     /// Full pipeline: bilinear sampling, FXAA, sharpening, colour correction.
-    #[default]
     High,
 }
 

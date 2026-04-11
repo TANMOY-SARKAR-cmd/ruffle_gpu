@@ -354,7 +354,15 @@ impl CommonGradient {
 
             colors
         };
-        let cache_key = (gradient.interpolation, gradient.records.clone());
+        // Pre-compute a 64-bit FNV-1a hash of the gradient definition.
+        // This avoids the `Vec::clone()` allocation that a Vec-keyed HashMap
+        // would require on every lookup; the hash is computed in O(n) over the
+        // records slice (no allocation) and the FnvHashMap then uses it as a
+        // trivially hashable u64 key.
+        let cache_key = crate::descriptors::gradient_cache_key(
+            gradient.interpolation,
+            &gradient.records,
+        );
         // Double-checked locking: hold the lock only for map operations so that
         // the (potentially slow) GPU texture allocation + upload happens outside
         // the critical section.

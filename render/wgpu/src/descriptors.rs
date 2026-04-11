@@ -8,15 +8,27 @@ use crate::{
 };
 use crate::buffer_pool::VertexInstancePool;
 use fnv::FnvHashMap;
-use std::collections::HashMap;
 use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use swf::{GradientInterpolation, GradientRecord};
 use wgpu::Backend;
 
-/// Cache key for gradient textures: determined solely by the colour-stop data
-/// and interpolation mode (the two inputs that decide pixel content).
-type GradientCacheKey = (GradientInterpolation, Vec<GradientRecord>);
+/// Compute a 64-bit FNV-1a hash of a gradient definition without cloning the
+/// records slice.  Used as the gradient texture cache key so that repeated
+/// lookups (common for shared gradient shapes) pay only O(n) hash cost with no
+/// heap allocation, instead of the O(n) clone that a `Vec`-keyed map would require.
+///
+/// Collision probability with FNV-64 over the bounded inputs (≤15 gradient
+/// stops × 5 bytes each) is negligible; Flash's SWF specification caps gradients
+/// at 15 colour stops and this constraint is enforced at the SWF-parser layer
+/// before `gradient_cache_key` is ever called.
+pub(crate) fn gradient_cache_key(interpolation: GradientInterpolation, records: &[GradientRecord]) -> u64 {
+    let mut h = fnv::FnvHasher::default();
+    interpolation.hash(&mut h);
+    records.hash(&mut h);
+    h.finish()
+}
 
 pub struct Descriptors {
     pub wgpu_instance: wgpu::Instance,
@@ -41,16 +53,19 @@ pub struct Descriptors {
     /// Shared across all rendering paths via `Descriptors`; thread-safe
     /// through the pool's internal `Mutex`.
     pub vertex_instance_pool: VertexInstancePool,
-    /// Cache of gradient textures keyed by `(interpolation, records)`.
+    /// Cache of gradient textures keyed by a pre-computed FNV-1a hash of the
+    /// `(GradientInterpolation, Vec<GradientRecord>)` pair.
     ///
-    /// Many SWF shapes reference the same gradient definition.  Creating
-    /// a 256×1 RGBA texture per shape is wasteful; this cache lets all shapes
-    /// with identical colour stops share a single GPU texture allocation.
-    /// `wgpu::Texture` is cheaply cloneable (internally Arc-backed).
+    /// Using a pre-hashed `u64` key (computed by [`gradient_cache_key`]) avoids
+    /// the `Vec::clone()` heap allocation that a `Vec`-keyed map would require on
+    /// every lookup — important because gradient lookups occur at shape-register
+    /// time, which is hot for SWFs with many gradient fills.
+    ///
+    /// `wgpu::Texture` is cheaply cloneable (internally `Arc`-backed).
     ///
     /// The cache is bounded by [`Self::purge_gradient_cache_if_oversized`],
     /// which is called at the end of every frame.
-    pub(crate) gradient_texture_cache: Mutex<HashMap<GradientCacheKey, wgpu::Texture>>,
+    pub(crate) gradient_texture_cache: Mutex<FnvHashMap<u64, wgpu::Texture>>,
 }
 
 impl Debug for Descriptors {
@@ -92,7 +107,7 @@ impl Descriptors {
             pipelines: Default::default(),
             filters,
             vertex_instance_pool: VertexInstancePool::new(),
-            gradient_texture_cache: Mutex::new(HashMap::new()),
+            gradient_texture_cache: Mutex::new(FnvHashMap::default()),
         }
     }
 
@@ -102,6 +117,10 @@ impl Descriptors {
     /// keeps worst-case VRAM usage bounded at roughly `MAX_ENTRIES` KiB while
     /// still achieving good reuse across typical SWF content (which tends to
     /// reuse a small number of gradient definitions).
+    ///
+    /// When the cache exceeds the limit, half of the entries are discarded
+    /// rather than clearing everything, so the most-recently-inserted half
+    /// is retained for the next frame.
     pub fn purge_gradient_cache_if_oversized(&self) {
         const MAX_ENTRIES: usize = 256;
         let mut cache = self
@@ -109,7 +128,15 @@ impl Descriptors {
             .lock()
             .expect("gradient_texture_cache lock poisoned");
         if cache.len() > MAX_ENTRIES {
-            cache.clear();
+            // Retain the most-recently-inserted half instead of clearing all
+            // entries at once.  This avoids a cliff-edge where a SWF with
+            // MAX_ENTRIES+1 unique gradients causes a full-cache miss every frame.
+            let keep = MAX_ENTRIES / 2;
+            let to_remove = cache.len().saturating_sub(keep);
+            let keys_to_remove: Vec<_> = cache.keys().take(to_remove).cloned().collect();
+            for key in keys_to_remove {
+                cache.remove(&key);
+            }
         }
     }
 
