@@ -123,12 +123,21 @@ struct GpuTimingState {
 }
 
 impl GpuTimingState {
-    /// Create GPU timing state if `TIMESTAMP_QUERY` is supported.
+    /// Create GPU timing state if `TIMESTAMP_QUERY` and
+    /// `TIMESTAMP_QUERY_INSIDE_ENCODERS` are both supported.
+    ///
+    /// `write_timestamp` on a `CommandEncoder` requires
+    /// `TIMESTAMP_QUERY_INSIDE_ENCODERS` (in addition to `TIMESTAMP_QUERY`).
+    /// Some Vulkan drivers (e.g. AMD Vega via the Vulkan backend) expose
+    /// `TIMESTAMP_QUERY` but not `TIMESTAMP_QUERY_INSIDE_ENCODERS`; in that
+    /// case we skip GPU timing entirely rather than panicking at runtime.
     fn new_if_supported(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Option<Self> {
-        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+        let required = wgpu::Features::TIMESTAMP_QUERY
+            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        if !device.features().contains(required) {
             return None;
         }
         let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -964,8 +973,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             self.frame_metrics.encode_time_ms()
         ));
         // GPU time from hardware timestamp queries (1-frame latency).
-        // Shows "N/A" when the device doesn't support TIMESTAMP_QUERY or before
-        // the first successful readback.
+        // Shows "N/A" when the device doesn't support TIMESTAMP_QUERY /
+        // TIMESTAMP_QUERY_INSIDE_ENCODERS or before the first successful readback.
         if self.gpu_timing.is_some() {
             let gpu_ms = self.frame_metrics.gpu_time_ms();
             if gpu_ms > 0.0 {
@@ -974,7 +983,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 result.push("GPU time (ms): pending".to_string());
             }
         } else {
-            result.push("GPU time (ms): N/A (TIMESTAMP_QUERY not supported)".to_string());
+            result.push("GPU time (ms): N/A (TIMESTAMP_QUERY_INSIDE_ENCODERS not supported)".to_string());
         }
         result.push(format!(
             "Draw calls (scene): {}",
@@ -1803,6 +1812,10 @@ async fn request_device(
         // used by the performance overlay to report GPU execution time.
         // Gracefully absent on WebGL2 / older Vulkan drivers.
         wgpu::Features::TIMESTAMP_QUERY,
+        // Required for `CommandEncoder::write_timestamp`.  Some Vulkan
+        // drivers support `TIMESTAMP_QUERY` but not this extension (e.g.
+        // AMD Vega 3 / RADV).  The timing path is skipped when absent.
+        wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
     ];
 
     for feature in try_features {
