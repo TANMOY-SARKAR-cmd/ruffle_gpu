@@ -55,6 +55,8 @@ pub struct CommandRenderer<'pass, 'frame: 'pass, 'global: 'frame> {
     /// whenever `set_transform_bind_group` rebinds group 1 for a non-instanced
     /// draw, ensuring the next instanced draw always re-binds correctly.
     current_group1_bitmap_bind_group: Option<*const wgpu::BindGroup>,
+    /// Cumulative count of GPU `draw_indexed` calls issued by this renderer.
+    draw_call_count: u32,
 }
 
 impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'global> {
@@ -82,6 +84,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             current_vertex_buffer: None,
             current_index_buffer: None,
             current_group1_bitmap_bind_group: None,
+            draw_call_count: 0,
         }
     }
 
@@ -316,6 +319,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             .set_index_buffer(indices, wgpu::IndexFormat::Uint32);
 
         self.render_pass.draw_indexed(0..num_indices, 0, 0..1);
+        self.draw_call_count += 1;
         // Mesh draws use partial buffer slices with varying ranges; invalidate
         // the cached state so the next draw correctly re-binds its buffers.
         self.current_vertex_buffer = None;
@@ -353,6 +357,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.set_vertex_buffer_cached(vb_key, vb_slice);
         self.set_index_buffer_cached(ib_key, ib_slice);
         self.render_pass.draw_indexed(0..6, 0, 0..1);
+        self.draw_call_count += 1;
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
         }
@@ -375,6 +380,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.set_vertex_buffer_cached(vb_key, vb_slice);
         self.set_index_buffer_cached(ib_key, ib_slice);
         self.render_pass.draw_indexed(0..6, 0, 0..1);
+        self.draw_call_count += 1;
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
         }
@@ -445,6 +451,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.set_vertex_buffer_cached(vb_key, vb_slice);
         self.set_index_buffer_cached(ib_key, ib_slice);
         self.render_pass.draw_indexed(0..6, 0, 0..1);
+        self.draw_call_count += 1;
 
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
@@ -463,6 +470,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.set_vertex_buffer_cached(vb_key, vb_slice);
         self.set_index_buffer_cached(ib_key, ib_slice);
         self.render_pass.draw_indexed(0..6, 0, 0..1);
+        self.draw_call_count += 1;
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
         }
@@ -507,6 +515,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         // Shared quad index buffer [0, 1, 2, 0, 2, 3] — two triangles.
         self.set_index_buffer_cached(ib_key, ib_slice);
         self.render_pass.draw_indexed(0..6, 0, 0..num_instances);
+        self.draw_call_count += 1;
         // Keep `current_vertex_buffer` pointing at `vertices_pos` and
         // `current_index_buffer` pointing at `indices`.  Non-instanced draws
         // that follow use the same cached helpers, so they will rebind slot 0
@@ -578,6 +587,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         // Shared quad index buffer [0, 1, 2, 0, 2, 3] — two triangles.
         self.set_index_buffer_cached(ib_key, ib_slice);
         self.render_pass.draw_indexed(0..6, 0, 0..num_instances);
+        self.draw_call_count += 1;
 
         // Keep `current_vertex_buffer` pointing at `vertices_pos` and
         // `current_index_buffer` pointing at `indices`.  Non-instanced draws
@@ -609,6 +619,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         self.set_vertex_buffer_cached(vb_key, vb_slice);
         self.set_index_buffer_cached(ib_key, ib_slice);
         self.render_pass.draw_indexed(0..num_indices, 0, 0..1);
+        self.draw_call_count += 1;
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.pop_debug_group();
         }
@@ -652,6 +663,11 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
 
     pub fn mask_state(&self) -> MaskState {
         self.mask_state
+    }
+
+    /// Total number of GPU `draw_indexed` calls issued by this renderer.
+    pub fn draw_call_count(&self) -> u32 {
+        self.draw_call_count
     }
 }
 

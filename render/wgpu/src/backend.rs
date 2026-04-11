@@ -102,6 +102,8 @@ struct FrameMetrics {
     initialized: bool,
     /// Exponential moving average of frame duration in milliseconds.
     smoothed_ms: f64,
+    /// Raw (unsmoothed) duration of the most recent frame in milliseconds.
+    last_raw_ms: f64,
     /// Current adaptive batch limit for `DrawRectInstanced` batches.
     rect_batch_limit: usize,
     /// Current adaptive batch limit for `DrawBitmapInstanced` batches.
@@ -112,6 +114,12 @@ struct FrameMetrics {
     /// no adjustment has been made yet.  `None` bypasses the cooldown so that
     /// the very first pressure signal is acted on without delay.
     last_adjust_frame: Option<u64>,
+    /// GPU draw calls (`draw_indexed`) issued during the most recent frame.
+    /// Covers scene-rendering passes (Chunk::Draw, Complex blend, Shader blend)
+    /// but excludes post-process copy passes.
+    draw_call_count: u32,
+    /// New GPU vertex-instance buffer allocations during the most recent frame.
+    buffer_alloc_count: u32,
 }
 
 impl FrameMetrics {
@@ -119,10 +127,13 @@ impl FrameMetrics {
         Self {
             initialized: false,
             smoothed_ms: 16.67, // start assuming 60 FPS
+            last_raw_ms: 16.67,
             rect_batch_limit: MAX_BATCH_LIMIT,
             bitmap_batch_limit: MAX_BATCH_LIMIT,
             frame_index: 0,
             last_adjust_frame: None,
+            draw_call_count: 0,
+            buffer_alloc_count: 0,
         }
     }
 
@@ -136,6 +147,7 @@ impl FrameMetrics {
     /// `begin_frame`.  Updates the EMA and adjusts both per-type batch limits.
     fn end_frame(&mut self, started_at: Instant) {
         let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        self.last_raw_ms = elapsed_ms;
 
         if self.initialized {
             // Update EMA — unchanged from before.
@@ -227,18 +239,55 @@ impl FrameMetrics {
         }
     }
 
-    /// Current batch-size limit for `DrawRectInstanced` batches.
-    /// Adaptive adjustment is disabled; always returns `MAX_BATCH_LIMIT` to
-    /// eliminate timing non-determinism caused by EMA/lerp/cooldown logic.
+    /// Returns the rect instanced batch-size limit used by the renderer.
+    ///
+    /// Adaptive batch limits are disabled for determinism. `FrameMetrics` is
+    /// used for monitoring only — the EMA/lerp/cooldown logic in `end_frame`
+    /// still runs and updates `self.rect_batch_limit`, but the stored value is
+    /// not consulted here so rendering output is unaffected by load variance.
     fn rect_batch_limit(&self) -> usize {
         MAX_BATCH_LIMIT
     }
 
-    /// Current batch-size limit for `DrawBitmapInstanced` batches.
-    /// Adaptive adjustment is disabled; always returns `MAX_BATCH_LIMIT` to
-    /// eliminate timing non-determinism caused by EMA/lerp/cooldown logic.
+    /// Returns the bitmap instanced batch-size limit used by the renderer.
+    ///
+    /// Adaptive batch limits are disabled for determinism. `FrameMetrics` is
+    /// used for monitoring only — the EMA/lerp/cooldown logic in `end_frame`
+    /// still runs and updates `self.bitmap_batch_limit`, but the stored value
+    /// is not consulted here so rendering output is unaffected by load variance.
     fn bitmap_batch_limit(&self) -> usize {
         MAX_BATCH_LIMIT
+    }
+
+    /// Estimated frames per second based on the smoothed frame time.
+    fn fps(&self) -> f64 {
+        if self.smoothed_ms > 0.0 {
+            1000.0 / self.smoothed_ms
+        } else {
+            0.0
+        }
+    }
+
+    /// Smoothed frame time in milliseconds (EMA).
+    fn frame_time_ms(&self) -> f64 {
+        self.smoothed_ms
+    }
+
+    /// Record per-frame statistics (draw calls and new buffer allocations).
+    /// Call once per frame after all rendering has completed.
+    fn record_frame_stats(&mut self, draw_calls: u32, allocs: u32) {
+        self.draw_call_count = draw_calls;
+        self.buffer_alloc_count = allocs;
+    }
+
+    /// GPU draw calls issued in the most recent frame.
+    fn draw_call_count(&self) -> u32 {
+        self.draw_call_count
+    }
+
+    /// New GPU vertex buffer allocations in the most recent frame.
+    fn buffer_alloc_count(&self) -> u32 {
+        self.buffer_alloc_count
     }
 }
 
@@ -677,6 +726,24 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         result.push(format!("Surface samples: {}", self.surface.sample_count()));
         result.push(format!("Surface size: {:?}", self.surface.size()));
 
+        // ── Performance overlay ───────────────────────────────────────────────
+        result.push(format!(
+            "FPS: {:.1}",
+            self.frame_metrics.fps()
+        ));
+        result.push(format!(
+            "Frame time (avg): {:.2} ms",
+            self.frame_metrics.frame_time_ms()
+        ));
+        result.push(format!(
+            "Draw calls (scene): {}",
+            self.frame_metrics.draw_call_count()
+        ));
+        result.push(format!(
+            "Instance buf allocs: {}",
+            self.frame_metrics.buffer_alloc_count()
+        ));
+
         Cow::Owned(result.join("\n"))
     }
 
@@ -750,6 +817,9 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 return;
             }
         };
+
+        // Accumulate draw calls from cache-entry surfaces (each is a local Surface).
+        let mut cache_entry_draw_calls: u32 = 0;
 
         for entry in cache_entries {
             let texture = as_texture(&entry.handle);
@@ -831,6 +901,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &mut self.active_frame.command_encoder,
                 );
             }
+            cache_entry_draw_calls += surface.draw_call_count();
             // Periodically flush GPU work to prevent OOM when many cache entries
             // accumulate (e.g. when a large container's cacheAsBitmap is skipped
             // but its hundreds of children each have their own bitmap caches).
@@ -868,6 +939,14 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         self.descriptors.vertex_instance_pool.purge_if_oversized();
         // Trim the gradient texture cache to prevent unbounded VRAM growth.
         self.descriptors.purge_gradient_cache_if_oversized();
+
+        // ── Collect per-frame performance stats ───────────────────────────────
+        // Accumulate draw calls from the main surface plus any cache-entry
+        // surfaces (those are local and their counts were tallied inline above).
+        let frame_draw_calls = self.surface.draw_call_count() + cache_entry_draw_calls;
+        let frame_allocs = self.descriptors.vertex_instance_pool.take_alloc_count();
+        self.frame_metrics
+            .record_frame_stats(frame_draw_calls, frame_allocs);
 
         // ── Update adaptive metrics after the frame has been submitted ────────
         self.frame_metrics.end_frame(frame_start);
