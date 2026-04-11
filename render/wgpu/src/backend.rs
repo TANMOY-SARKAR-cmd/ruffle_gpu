@@ -89,6 +89,16 @@ const WARMUP_FRAMES: u64 = 8;
 /// a smoothed (EMA) frame time, and derives per-type batch limits (`rect_batch_limit`
 /// and `bitmap_batch_limit`) bounded by `MIN_BATCH_LIMIT` and `MAX_BATCH_LIMIT`.
 ///
+/// # Timing breakdown
+///
+/// Two separate measurements are tracked:
+/// * `encode_ms` — time to build and encode all GPU commands (CPU-bound work).
+/// * `smoothed_ms` — EMA-smoothed total frame duration (encode + submit + present).
+///
+/// The encode/submit split helps distinguish CPU bottlenecks (high `encode_ms`)
+/// from GPU / driver bottlenecks (high `total - encode`), without requiring
+/// GPU timestamp query support.
+///
 /// # Safety guarantees
 /// * The batch limits only change *how many* instances are packed into a single
 ///   GPU draw call before an automatic flush; they never change *which* commands
@@ -104,6 +114,10 @@ struct FrameMetrics {
     smoothed_ms: f64,
     /// Raw (unsmoothed) duration of the most recent frame in milliseconds.
     last_raw_ms: f64,
+    /// Time spent encoding GPU commands during the most recent frame (ms).
+    /// Covers command building, staging-belt work, and `chunk_blends` but
+    /// excludes `queue.submit` and driver/GPU work.
+    last_encode_ms: f64,
     /// Current adaptive batch limit for `DrawRectInstanced` batches.
     rect_batch_limit: usize,
     /// Current adaptive batch limit for `DrawBitmapInstanced` batches.
@@ -128,6 +142,7 @@ impl FrameMetrics {
             initialized: false,
             smoothed_ms: 16.67, // start assuming 60 FPS
             last_raw_ms: 16.67,
+            last_encode_ms: 0.0,
             rect_batch_limit: MAX_BATCH_LIMIT,
             bitmap_batch_limit: MAX_BATCH_LIMIT,
             frame_index: 0,
@@ -138,9 +153,15 @@ impl FrameMetrics {
     }
 
     /// Call at the **start** of `submit_frame`.  Returns the `Instant` that
-    /// should be passed to `end_frame` after GPU submission completes.
+    /// should be passed to `encode_done` / `end_frame`.
     fn begin_frame(&mut self) -> Instant {
         Instant::now()
+    }
+
+    /// Call immediately after command encoding is complete (before
+    /// `queue.submit`).  Records the CPU encode time for the current frame.
+    fn encode_done(&mut self, started_at: Instant) {
+        self.last_encode_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     }
 
     /// Call at the **end** of `submit_frame` with the `Instant` from
@@ -271,6 +292,14 @@ impl FrameMetrics {
     /// Smoothed frame time in milliseconds (EMA).
     fn frame_time_ms(&self) -> f64 {
         self.smoothed_ms
+    }
+
+    /// CPU command-encoding time for the most recent frame (ms).
+    ///
+    /// Covers `chunk_blends`, staging-belt work, and filter passes.
+    /// The remaining `frame_time_ms - encode_ms` approximates driver/GPU time.
+    fn encode_time_ms(&self) -> f64 {
+        self.last_encode_ms
     }
 
     /// Record per-frame statistics (draw calls and new buffer allocations).
@@ -736,6 +765,16 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             self.frame_metrics.frame_time_ms()
         ));
         result.push(format!(
+            "Encode time (CPU): {:.2} ms",
+            self.frame_metrics.encode_time_ms()
+        ));
+        let has_ts = self.descriptors.device.features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY);
+        result.push(format!(
+            "GPU timestamp queries: {}",
+            if has_ts { "available" } else { "unavailable" }
+        ));
+        result.push(format!(
             "Draw calls (scene): {}",
             self.frame_metrics.draw_call_count()
         ));
@@ -928,6 +967,12 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             bitmap_batch_limit,
         );
         self.active_frame.staging_belt.finish();
+
+        // ── Record CPU encoding time ─────────────────────────────────────────
+        // Capture the timestamp just before we hand command buffers to the
+        // driver so `encode_ms` reflects pure CPU encoding cost and not
+        // driver-side submission or GPU execution time.
+        self.frame_metrics.encode_done(frame_start);
 
         self.active_frame
             .submit_for_target(&self.descriptors, &self.target, frame_output);
@@ -1508,6 +1553,11 @@ async fn request_device(
         wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
         wgpu::Features::TEXTURE_COMPRESSION_BC,
         wgpu::Features::FLOAT32_FILTERABLE,
+        // Enable GPU timestamp queries when supported.  Timestamps do not
+        // affect rendered output or determinism; they are read-only probes
+        // used by the performance overlay to report GPU execution time.
+        // Gracefully absent on WebGL2 / older Vulkan drivers.
+        wgpu::Features::TIMESTAMP_QUERY,
     ];
 
     for feature in try_features {
