@@ -1773,6 +1773,25 @@ pub async fn request_adapter_and_device(
     let info = adapter.get_info();
     if info.backend == wgpu::Backend::Vulkan {
         tracing::info!("Explicitly selected Vulkan backend.");
+
+        // Warn when the chosen Vulkan adapter is a compatibility wrapper rather
+        // than a native driver.  These adapters (e.g. the Windows D3D12→Vulkan
+        // translation layer "Microsoft Direct3D12") frequently lack Vulkan
+        // extensions required by Ruffle — notably
+        // `TIMESTAMP_QUERY_INSIDE_ENCODERS` — and can produce texture-layout
+        // validation errors on AMD hardware.  The desktop front-end's
+        // `try_wgpu_backend` already filters them out during back-end selection,
+        // but the wgpu back-end can also be constructed directly (e.g. from
+        // tests or embedder code), so this warning covers that path as well.
+        if info.name.contains("Microsoft Direct3D12") || info.name.contains("WARP") {
+            tracing::warn!(
+                "Selected Vulkan adapter '{}' appears to be a compatibility wrapper \
+                 over another graphics API rather than a native Vulkan driver. \
+                 This may cause validation errors or missing feature support. \
+                 Consider selecting the DX12 or GL back-end instead.",
+                info.name,
+            );
+        }
     }
     tracing::info!(
         "Selected GPU adapter: {} ({:?}) via {:?} backend",

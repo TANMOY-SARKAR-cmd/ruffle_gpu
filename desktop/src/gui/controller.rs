@@ -574,12 +574,58 @@ fn select_wgpu_backend(
     ))
 }
 
+/// Returns `true` when an adapter is suitable for Ruffle's rendering needs.
+///
+/// Filters out two classes of problematic adapters:
+///
+/// 1. **CPU / software adapters** (WARP, Mesa llvmpipe, …): they lack
+///    hardware acceleration, have severe performance limitations, and often
+///    report only a subset of GPU features, leading to validation errors.
+///
+/// 2. **Vulkan compatibility wrappers** ("Microsoft Direct3D12 on …"): on
+///    Windows, the D3D12 translation layer exposes a Vulkan interface that
+///    is frequently incomplete — notably missing
+///    `TIMESTAMP_QUERY_INSIDE_ENCODERS` and producing texture image-layout
+///    conflicts (RESOURCE vs. COLOR_TARGET) on AMD Vega hardware.  Ruffle
+///    should prefer the native DX12 back-end on Windows instead.
+fn is_adapter_suitable(backend: wgpu::Backends, info: &wgpu::AdapterInfo) -> bool {
+    // Reject pure-software (CPU) adapters unconditionally.
+    if info.device_type == wgpu::DeviceType::Cpu {
+        tracing::debug!(
+            "Skipping CPU/software adapter '{}' on {:?} backend",
+            info.name,
+            backend,
+        );
+        return false;
+    }
+
+    // When the caller is asking for a *native* Vulkan driver, skip adapters
+    // that are thin wrappers over another API.  These are recognisable by
+    // "Microsoft Direct3D12" in the adapter name (the Windows D3D12→Vulkan
+    // compatibility layer) or "WARP" (Windows Advanced Rasterization Platform,
+    // Microsoft's software Vulkan fallback).
+    if backend == wgpu::Backends::VULKAN
+        && (info.name.contains("Microsoft Direct3D12") || info.name.contains("WARP"))
+    {
+        tracing::debug!(
+            "Skipping Vulkan adapter '{}' (compatibility wrapper, not a native Vulkan driver)",
+            info.name,
+        );
+        return false;
+    }
+
+    true
+}
+
 fn try_wgpu_backend(backend: wgpu::Backends) -> Option<wgpu::Instance> {
     let instance = create_wgpu_instance(backend, wgpu::BackendOptions::default());
-    if instance.enumerate_adapters(backend).is_empty() {
-        None
-    } else {
+    let has_suitable = instance
+        .enumerate_adapters(backend)
+        .any(|a| is_adapter_suitable(backend, &a.get_info()));
+    if has_suitable {
         Some(instance)
+    } else {
+        None
     }
 }
 
