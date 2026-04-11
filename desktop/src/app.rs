@@ -353,6 +353,14 @@ impl MainWindow {
                 scale_factor: viewport_scale_factor,
             });
         }
+
+        // Update the fixed timestep to match the SWF's actual frame rate so
+        // that the accumulator ticks at the correct cadence regardless of
+        // whether the movie runs at 24, 30, or 60 fps.
+        let fps = swf_header.frame_rate().to_f64();
+        if fps > 0.0 {
+            self.fixed_dt = 1.0 / fps;
+        }
     }
 
     fn about_to_wait(&mut self, gilrs: Option<&mut Gilrs>) {
@@ -391,23 +399,6 @@ impl MainWindow {
                 self.time = new_time;
                 self.accumulator += capped_dt;
 
-                // --- Frame pacing: sleep until the target frame interval has
-                // elapsed since the last completed frame.  This prevents burst
-                // rendering when the event loop wakes up too early.
-                let target_interval = Duration::from_secs_f64(self.fixed_dt);
-                let elapsed_since_last = new_time.duration_since(self.last_frame_end);
-                if elapsed_since_last < target_interval {
-                    // Busy-wait for the remainder to avoid OS sleep jitter
-                    // inflating the next delta beyond one tick.
-                    let remaining = target_interval - elapsed_since_last;
-                    if remaining > Duration::from_millis(2) {
-                        std::thread::sleep(remaining - Duration::from_millis(1));
-                    }
-                    // Spin for the final ≤ 2 ms to land precisely on target.
-                    while self.last_frame_end.elapsed() < target_interval {}
-                }
-                self.last_frame_end = Instant::now();
-
                 // --- Fixed-timestep accumulator loop ---
                 // Consume accumulated time in fixed_dt increments.  This
                 // decouples the render rate from wall-clock jitter: a late
@@ -423,6 +414,18 @@ impl MainWindow {
                     });
                     self.accumulator -= self.fixed_dt;
                 }
+
+                // If the accumulator hasn't reached a full tick yet (e.g. on
+                // the very first frame or after a very short wakeup), tell
+                // winit when to schedule the next wakeup so the event loop
+                // doesn't busy-spin.  Frame pacing is handled by winit's
+                // ControlFlow::WaitUntil in about_to_wait().
+                if self.next_frame_time.is_none() {
+                    self.next_frame_time =
+                        Some(self.last_frame_end + Duration::from_secs_f64(self.fixed_dt));
+                }
+                self.last_frame_end = Instant::now();
+
                 self.check_redraw();
             }
         }
