@@ -245,10 +245,17 @@ impl CommandTarget {
                         Some(ResolveBuffer::new_manual(texture.clone())),
                     )
                 } else {
-                    (
-                        FrameBuffer::new_manual(texture.clone(), texture.size()),
-                        None,
-                    )
+                    // Use a pooled frame buffer instead of the texture directly.
+                    // This prevents a wgpu validation error that occurs when the same
+                    // texture is used as both the COLOR_TARGET (render attachment) and
+                    // a RESOURCE (bind group / sampled texture) within the same render
+                    // pass.  That can happen when CacheAsBitmap display objects contain
+                    // a Bitmap child whose bitmapData is the same texture being rendered
+                    // into.  wgpu 27+ (deferred encoding) raises a fatal panic in this
+                    // situation.  Rendering into a temporary pool texture avoids the
+                    // conflict; the caller is responsible for copying the result back to
+                    // the original texture via `copy_to_existing_texture`.
+                    (make_pooled_frame_buffer(), None)
                 }
             } else if sample_count > 1 {
                 (
@@ -344,6 +351,26 @@ impl CommandTarget {
         self.resolve_buffer
             .map(|b| b.take_texture())
             .unwrap_or_else(|| self.frame_buffer.take_texture())
+    }
+
+    /// For `ExistingWithColor` targets with `sample_count == 1`, the rendered
+    /// content ends up in the pooled frame buffer rather than in the original
+    /// texture.  Call this after all rendering is complete to copy the pool
+    /// texture's contents back into the original `ExistingWithColor` texture.
+    ///
+    /// For MSAA targets the resolve already writes into the original texture as
+    /// the render-pass resolve target, so no extra copy is needed.  For all
+    /// other `RenderTargetMode` variants this is a no-op.
+    pub fn copy_to_existing_texture(&self, encoder: &mut wgpu::CommandEncoder) {
+        if let RenderTargetMode::ExistingWithColor(texture, _) = &self.render_target_mode {
+            if self.sample_count == 1 {
+                encoder.copy_texture_to_texture(
+                    self.frame_buffer.texture().as_image_copy(),
+                    texture.as_image_copy(),
+                    self.size,
+                );
+            }
+        }
     }
 
     pub fn globals(&self) -> &Globals {
