@@ -701,24 +701,25 @@ impl<'gc> Avm2<'gc> {
         /// caused by a missing `MouseWheel` handler).
         const MAX_REPEATED_ERRORS: u32 = 5;
 
-        let key = format!("{}: {:?}", info, error);
+        let dedupe_key = format!("{}: {}", info, error);
         let count = activation
             .context
             .avm2
             .suppressed_errors
-            .entry(key.clone())
+            .entry(dedupe_key)
             .or_insert(0);
         *count += 1;
 
         match *count {
             1..=MAX_REPEATED_ERRORS => {
-                tracing::error!("{}", key);
+                tracing::error!("{}: {:?}", info, error);
             }
             n if n == MAX_REPEATED_ERRORS + 1 => {
                 tracing::warn!(
-                    "Suppressing further repeated AVM2 error (shown {} times): {}",
+                    "Suppressing further repeated AVM2 error (shown {} times): {}: {:?}",
                     MAX_REPEATED_ERRORS,
-                    key
+                    info,
+                    error
                 );
             }
             _ => {} // silently suppressed
