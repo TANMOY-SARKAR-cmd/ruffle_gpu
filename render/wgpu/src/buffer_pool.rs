@@ -20,12 +20,16 @@ impl TexturePool {
     }
 
     /// Trim each sub-pool so that no more than `max_per_key` idle textures are
-    /// held per distinct `(size, format, usage, sample_count)` key, and clear
-    /// the entire globals cache once it exceeds `MAX_GLOBALS` entries.
+    /// held per distinct `(size, format, usage, sample_count)` key, and halve
+    /// the globals cache once it exceeds `MAX_GLOBALS` entries.
     ///
     /// Call this at the end of every frame instead of replacing the pool with a
     /// fresh `TexturePool::new()`.  This keeps GPU textures alive across frames
     /// so that the next frame can reuse them, while bounding peak memory use.
+    ///
+    /// When the globals cache exceeds the limit, half of its entries are dropped
+    /// rather than clearing everything at once, avoiding a cliff-edge frame spike
+    /// for content that rotates through more than `MAX_GLOBALS` configurations.
     pub fn purge_if_oversized(&mut self) {
         const MAX_PER_KEY: usize = 4;
         const MAX_GLOBALS: usize = 16;
@@ -33,8 +37,14 @@ impl TexturePool {
         for pool in self.pools.values_mut() {
             pool.purge_excess(MAX_PER_KEY);
         }
-        if self.globals_cache.len() > MAX_GLOBALS {
-            self.globals_cache.clear();
+        let globals_len = self.globals_cache.len();
+        if globals_len > MAX_GLOBALS {
+            let keep = MAX_GLOBALS / 2;
+            let to_remove = globals_len.saturating_sub(keep);
+            let keys_to_remove: Vec<_> = self.globals_cache.keys().take(to_remove).cloned().collect();
+            for key in keys_to_remove {
+                self.globals_cache.remove(&key);
+            }
         }
     }
 

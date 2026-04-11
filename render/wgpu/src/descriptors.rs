@@ -102,6 +102,10 @@ impl Descriptors {
     /// keeps worst-case VRAM usage bounded at roughly `MAX_ENTRIES` KiB while
     /// still achieving good reuse across typical SWF content (which tends to
     /// reuse a small number of gradient definitions).
+    ///
+    /// When the cache exceeds the limit, half of the entries are discarded
+    /// rather than clearing everything, so the most-recently-inserted half
+    /// is retained for the next frame.
     pub fn purge_gradient_cache_if_oversized(&self) {
         const MAX_ENTRIES: usize = 256;
         let mut cache = self
@@ -109,7 +113,15 @@ impl Descriptors {
             .lock()
             .expect("gradient_texture_cache lock poisoned");
         if cache.len() > MAX_ENTRIES {
-            cache.clear();
+            // Retain the most-recently-inserted half instead of clearing all
+            // entries at once.  This avoids a cliff-edge where a SWF with
+            // MAX_ENTRIES+1 unique gradients causes a full-cache miss every frame.
+            let keep = MAX_ENTRIES / 2;
+            let to_remove = cache.len().saturating_sub(keep);
+            let keys_to_remove: Vec<_> = cache.keys().take(to_remove).cloned().collect();
+            for key in keys_to_remove {
+                cache.remove(&key);
+            }
         }
     }
 
