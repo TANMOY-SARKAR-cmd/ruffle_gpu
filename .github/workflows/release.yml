@@ -5,17 +5,37 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Version tag (e.g. v0.2.0)"
-        required: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  setup:
+    name: Determine Release Tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.get_tag.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG=$(git describe --tags --abbrev=0)
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
   build:
     name: Build (${{ matrix.os }})
+    needs: setup
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -37,20 +57,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.setup.outputs.tag }}
           fetch-depth: 0
-
-      - name: Create tag (manual trigger)
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.tag != ''
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git fetch --tags
-          if git rev-parse "${{ github.event.inputs.tag }}" >/dev/null 2>&1; then
-            echo "Tag already exists, skipping"
-          else
-            git tag "${{ github.event.inputs.tag }}"
-            git push https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/${{ github.repository }} "${{ github.event.inputs.tag }}"
-          fi
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -107,7 +115,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [setup, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -121,7 +129,7 @@ jobs:
       - name: Create GitHub Release and upload binaries
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.setup.outputs.tag }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
