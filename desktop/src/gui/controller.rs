@@ -604,6 +604,20 @@ fn prioritized_backends(backends: wgpu::Backends) -> Vec<wgpu::Backends> {
     }
 
     let mut ordered = Vec::new();
+    // Prefer the platform-native backend before Vulkan for best SWF compatibility.
+    // On Windows, Direct3D 12 is more reliable than Vulkan on a wider range of
+    // hardware (many Windows drivers expose Vulkan with partial compliance).
+    // On Apple platforms, Metal is always preferred over Vulkan.
+    // On Linux/other platforms Vulkan is the best primary choice, so it retains
+    // its current position.
+    #[cfg(target_os = "windows")]
+    if backends.contains(wgpu::Backends::DX12) {
+        ordered.push(wgpu::Backends::DX12);
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    if backends.contains(wgpu::Backends::METAL) {
+        ordered.push(wgpu::Backends::METAL);
+    }
     if backends.contains(wgpu::Backends::VULKAN) {
         ordered.push(wgpu::Backends::VULKAN);
     }
