@@ -168,7 +168,13 @@ impl GpuTimingState {
     fn try_read_result(&mut self, device: &wgpu::Device) -> Option<f64> {
         let rx = self.pending.as_ref()?;
         // Non-blocking poll — fires the map_async callback if the GPU is done.
-        let _ = device.poll(wgpu::PollType::Poll);
+        if device.poll(wgpu::PollType::Poll).is_err() {
+            // Polling failed (for example, due to device loss), so this read
+            // will not make progress. Clear the pending state so timing does
+            // not remain stuck waiting forever.
+            self.pending = None;
+            return None;
+        }
         match rx.try_recv() {
             Ok(Ok(())) => {
                 // Mapping succeeded: read the two 64-bit tick counts.
