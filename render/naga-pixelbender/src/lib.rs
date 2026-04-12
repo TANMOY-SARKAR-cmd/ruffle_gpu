@@ -4,9 +4,9 @@ use anyhow::Result;
 use naga::{
     AddressSpace, ArraySize, BinaryOperator, Binding, Block, BuiltIn, EntryPoint, Expression,
     Function, FunctionArgument, FunctionResult, GlobalVariable, Handle, ImageClass, ImageDimension,
-    ImageQuery, Literal, LocalVariable, MathFunction, Module, RelationalFunction, ResourceBinding,
-    ScalarKind, ShaderStage, Span, Statement, SwizzleComponent, Type, TypeInner, UnaryOperator,
-    VectorSize,
+    ImageQuery, Literal, LocalVariable, MathFunction, MemoryDecorations, Module, RelationalFunction,
+    ResourceBinding, ScalarKind, ShaderStage, Span, Statement, SwizzleComponent, Type, TypeInner,
+    UnaryOperator, VectorSize,
     valid::{Capabilities, ValidationFlags, Validator},
 };
 use ruffle_render::pixel_bender::{
@@ -240,6 +240,7 @@ impl ShaderBuilder<'_> {
                 interpolation: Some(naga::Interpolation::Perspective),
                 sampling: Some(naga::Sampling::Center),
                 blend_src: None,
+                per_primitive: false,
             }),
         });
 
@@ -250,6 +251,7 @@ impl ShaderBuilder<'_> {
                 interpolation: None,
                 sampling: None,
                 blend_src: None,
+                per_primitive: false,
             }),
         });
 
@@ -270,6 +272,7 @@ impl ShaderBuilder<'_> {
                         Span::UNDEFINED,
                     ),
                     init: None,
+                    memory_decorations: MemoryDecorations::empty(),
                 },
                 Span::UNDEFINED,
             );
@@ -354,6 +357,7 @@ impl ShaderBuilder<'_> {
                 }),
                 ty: vec4f,
                 init: None,
+                memory_decorations: MemoryDecorations::empty(),
             },
             Span::UNDEFINED,
         );
@@ -441,6 +445,9 @@ impl ShaderBuilder<'_> {
             workgroup_size: [0; 3],
             workgroup_size_overrides: None,
             function: builder.func,
+            mesh_info: None,
+            task_payload: None,
+            incoming_ray_payload: None,
         });
 
         Ok(NagaModules {
@@ -540,6 +547,7 @@ impl ShaderBuilder<'_> {
                             }),
                             ty: self.image2d,
                             init: None,
+                            memory_decorations: MemoryDecorations::empty(),
                         },
                         Span::UNDEFINED,
                     );
@@ -580,6 +588,7 @@ impl ShaderBuilder<'_> {
                     Span::UNDEFINED,
                 ),
                 init: None,
+                memory_decorations: MemoryDecorations::empty(),
             },
             Span::UNDEFINED,
         );
@@ -604,6 +613,7 @@ impl ShaderBuilder<'_> {
                     Span::UNDEFINED,
                 ),
                 init: None,
+                memory_decorations: MemoryDecorations::empty(),
             },
             Span::UNDEFINED,
         );
