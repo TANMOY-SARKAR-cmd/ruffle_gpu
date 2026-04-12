@@ -109,39 +109,55 @@ impl OpenH264Codec {
         const URL_BASE: &str = "http://ciscobinary.openh264.org/";
         const URL_SUFFIX: &str = ".bz2";
 
+        // Validate the directory path to prevent path traversal attacks.
+        if directory
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(
+                "OpenH264 cache directory path must not contain '..' components".into(),
+            );
+        }
+
         let (filename, sha256sum) = (
             openh264_data.download_filename,
             openh264_data.download_sha256,
         );
 
         // Ensure the library filename is a plain file name with no directory components,
-        // preventing path traversal through the (otherwise hardcoded) filename.
+        // preventing any path traversal through the (otherwise hardcoded) filename.
         if Path::new(filename).components().count() != 1 {
             return Err(
                 "internal error: library filename must not contain path components".into(),
             );
         }
 
-        // Validate the directory path to prevent path traversal attacks.
-        // Rebuild the path from its components, rejecting any parent-directory references.
-        let directory = directory
-            .components()
-            .try_fold(std::path::PathBuf::new(), |acc, component| {
-                if component == std::path::Component::ParentDir {
-                    Err("OpenH264 cache directory path must not contain '..' components")
-                } else {
-                    Ok(acc.join(component.as_os_str()))
+        // Build a safe directory path by canonicalizing the deepest existing ancestor
+        // and appending the remaining (already validated) path components. This ensures
+        // that symlinks in the existing portion of the path are resolved before we create
+        // any new directories, preventing symlink-based path traversal.
+        let directory = {
+            let mut found_ancestor = None;
+            for ancestor in directory.ancestors() {
+                if ancestor.exists() {
+                    found_ancestor = Some((
+                        ancestor.canonicalize()?,
+                        directory.strip_prefix(ancestor)?.to_path_buf(),
+                    ));
+                    break;
                 }
-            })
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-        let directory = directory.as_path();
+            }
+            let (canonical_base, remaining) = found_ancestor
+                .ok_or("cache directory path has no accessible ancestor on the filesystem")?;
+            canonical_base.join(remaining)
+        };
 
-        std::fs::create_dir_all(directory)?;
+        std::fs::create_dir_all(&directory)?;
         let directory = directory.canonicalize()?;
         let filepath = directory.join(filename);
 
         // Verify the resolved filepath remains within the expected directory
-        // as a defense-in-depth measure against path traversal.
+        // as a defense-in-depth measure against any remaining path traversal.
         if !filepath.starts_with(&directory) {
             return Err("Resolved library path is outside the cache directory".into());
         }
