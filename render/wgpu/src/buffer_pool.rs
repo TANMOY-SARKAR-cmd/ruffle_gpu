@@ -372,3 +372,102 @@ impl Drop for PooledVertexBuffer {
         }
     }
 }
+
+// ── Staging Belt Ring Buffer ──────────────────────────────────────────────────
+//
+// Maintains a fixed-size ring of `wgpu::util::StagingBelt` instances so that
+// the CPU can start uploading data for frame N+1 while the GPU is still
+// consuming frame N.  Each slot is used in round-robin order:
+//
+//   frame 0 → belt[0] → submit → recall()
+//   frame 1 → belt[1] → submit → recall()
+//   frame 2 → belt[2] → submit → recall()
+//   frame 3 → belt[0] → (GPU finished frame 0; safe to reuse)
+//
+// With RING_DEPTH = 3 we get triple-buffered staging uploads, which prevents
+// GPU starvation even when wgpu's internal fence / present waits push latency
+// into the 2–3 frame range.
+//
+// `StagingBelt::recall()` is called *after* `queue.submit()` on the same belt,
+// which schedules a non-blocking reclaim: wgpu internally waits for the GPU to
+// finish before making the memory available again.  By cycling through
+// RING_DEPTH belts we avoid blocking the CPU on that reclaim.
+
+/// Number of staging belt slots in the ring.
+///
+/// Three gives a triple-buffered upload pipeline: by the time we wrap around
+/// to reuse slot 0, the GPU has had two full frames to consume it.
+pub const STAGING_BELT_RING_DEPTH: usize = 3;
+
+/// A ring of `StagingBelt` instances that are cycled through each frame.
+///
+/// # Usage
+///
+/// 1. Call [`StagingBeltRing::current`] to get a mutable reference to the
+///    active belt for the current frame.
+/// 2. After `queue.submit()`, call [`StagingBeltRing::finish_and_advance`]:
+///    this calls `finish()` + `recall()` on the current belt and steps the
+///    ring index forward.
+pub struct StagingBeltRing {
+    belts: Box<[wgpu::util::StagingBelt]>,
+    /// Index of the belt used for the *current* frame.
+    head: usize,
+}
+
+impl StagingBeltRing {
+    /// Create a new ring with `depth` staging belts, each pre-allocated to
+    /// `belt_size` bytes.  A `belt_size` of 4 MiB matches the historical
+    /// single-belt allocation and keeps per-frame upload headroom generous.
+    pub fn new(depth: usize, belt_size: u64) -> Self {
+        assert!(depth >= 1, "ring depth must be at least 1");
+        let belts = (0..depth)
+            .map(|_| wgpu::util::StagingBelt::new(belt_size))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self { belts, head: 0 }
+    }
+
+    /// Return a mutable reference to the staging belt for the current frame.
+    #[inline]
+    pub fn current(&mut self) -> &mut wgpu::util::StagingBelt {
+        &mut self.belts[self.head]
+    }
+
+    /// Finalise the current belt's uploads (`finish()`), schedule GPU-side
+    /// reclaim (`recall()`), then advance the ring to the next slot.
+    ///
+    /// Call this *after* `queue.submit()` so that the GPU submission associated
+    /// with this belt's data is already in-flight before the reclaim begins.
+    pub fn finish_and_advance(&mut self) {
+        let belt = &mut self.belts[self.head];
+        // `finish()` must be called before submission; callers that call
+        // `finish()` themselves (e.g. `submit_for_target`) should call
+        // `recall_and_advance()` instead.
+        belt.recall();
+        self.head = (self.head + 1) % self.belts.len();
+    }
+
+    /// Schedule GPU-side reclaim for the current belt and advance the ring.
+    ///
+    /// Use this after the caller has already called `belt.finish()` and
+    /// `queue.submit()`.
+    pub fn recall_and_advance(&mut self) {
+        self.belts[self.head].recall();
+        self.head = (self.head + 1) % self.belts.len();
+    }
+
+    /// Depth (number of slots) in this ring.
+    #[inline]
+    pub fn depth(&self) -> usize {
+        self.belts.len()
+    }
+}
+
+impl std::fmt::Debug for StagingBeltRing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StagingBeltRing")
+            .field("depth", &self.belts.len())
+            .field("head", &self.head)
+            .finish()
+    }
+}
