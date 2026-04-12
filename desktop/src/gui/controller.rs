@@ -621,6 +621,7 @@ fn try_wgpu_backend(backend: wgpu::Backends) -> Option<wgpu::Instance> {
     let instance = create_wgpu_instance(backend, wgpu::BackendOptions::default());
     let has_suitable = instance
         .enumerate_adapters(backend)
+        .iter()
         .any(|a| is_adapter_suitable(backend, &a.get_info()));
     if has_suitable {
         Some(instance)
