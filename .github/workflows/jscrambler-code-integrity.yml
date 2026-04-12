@@ -34,6 +34,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      # Rust toolchain + wasm32-unknown-unknown target are required by the
+      # web build (packages/core invokes `cargo build --target wasm32-unknown-unknown`).
+      - name: Setup Rust (needed for wasm build)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - run: npm ci
       - run: npm run build
       - name: Jscrambler Code Integrity
