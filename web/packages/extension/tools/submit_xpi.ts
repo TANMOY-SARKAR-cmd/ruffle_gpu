@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import url from "node:url";
 import crypto from "node:crypto";
 import { setTimeout } from "node:timers/promises";
 import axios from "axios";
@@ -20,41 +21,6 @@ function validatePathSegment(value: string, name: string): string {
         );
     }
     return encodeURIComponent(value);
-}
-
-/**
- * Validates that a file path is safe to use (no null bytes or path traversal).
- * Optionally validates that the file has one of the given extensions.
- */
-function validateFilePath(
-    filePath: string,
-    name: string,
-    allowedExtensions?: string[],
-): string {
-    if (filePath.includes("\0")) {
-        throw new Error(`${name} contains null bytes.`);
-    }
-    const resolved = path.resolve(filePath);
-    if (!resolved) {
-        throw new Error(`${name} resolves to an empty path.`);
-    }
-    // Restrict to within the current working directory to prevent path traversal.
-    const cwd = process.cwd();
-    const cwdWithSep = cwd.endsWith(path.sep) ? cwd : cwd + path.sep;
-    if (resolved !== cwd && !resolved.startsWith(cwdWithSep)) {
-        throw new Error(
-            `${name} must be within the current working directory. Got: ${resolved}`,
-        );
-    }
-    if (allowedExtensions) {
-        const ext = path.extname(resolved).toLowerCase();
-        if (!allowedExtensions.includes(ext)) {
-            throw new Error(
-                `${name} must have one of these extensions: ${allowedExtensions.join(", ")}. Got: ${ext}`,
-            );
-        }
-    }
-    return resolved;
 }
 
 function getJwtToken(apiKey: string, apiSecret: string) {
@@ -82,8 +48,25 @@ async function submit(
 
     // Validate inputs before use
     const safeExtensionId = validatePathSegment(extensionId, "FIREFOX_EXTENSION_ID");
-    const safeUnsignedPath = validateFilePath(unsignedPath, "unsigned XPI path", [".xpi"]);
-    const safeSourcePath = validateFilePath(sourcePath, "source ZIP path", [".zip"]);
+
+    // Use path.basename to extract only the filename from user-supplied paths,
+    // then join with trusted base directories (derived from the script location).
+    // path.basename is a CodeQL-recognised sanitiser that prevents path traversal.
+    const toolsDir = path.dirname(url.fileURLToPath(import.meta.url));
+    const distDir = path.resolve(toolsDir, "../dist");
+    const repoRoot = path.resolve(toolsDir, "../../../..");
+
+    const unsignedFilename = path.basename(unsignedPath);
+    if (!unsignedFilename || !unsignedFilename.endsWith(".xpi")) {
+        throw new Error("Unsigned add-on path must be an .xpi file.");
+    }
+    const safeUnsignedPath = path.join(distDir, unsignedFilename);
+
+    const sourceFilename = path.basename(sourcePath);
+    if (!sourceFilename || !sourceFilename.endsWith(".zip")) {
+        throw new Error("Source path must be a .zip file.");
+    }
+    const safeSourcePath = path.join(repoRoot, sourceFilename);
 
     // For API docs, see: https://mozilla.github.io/addons-server/topics/api/addons.html
     const client = axios.create({
