@@ -55,7 +55,7 @@ naga = { version = "27.0.3", features = ["wgsl-out"] }
 wgpu = "27.0.1"
 egui = "0.33.3"
 clap = { version = "4.6.0", features = ["derive"] }
-cpal = "0.16.0"
+cpal = "0.17.3"
 anyhow = "1.0"
 gc-arena = { git = "https://github.com/kyren/gc-arena.git", rev = "75671ae03f53718357b741ed4027560f14e90836", features = ["hashbrown", "indexmap", "smallvec", "slotmap"] }
 slotmap = "1.1.1"
