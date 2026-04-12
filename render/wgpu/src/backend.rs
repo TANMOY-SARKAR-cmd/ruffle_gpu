@@ -1,5 +1,5 @@
 use crate::buffer_builder::BufferBuilder;
-use crate::buffer_pool::{BufferPool, StagingBeltRing, TexturePool, STAGING_BELT_RING_DEPTH};
+use crate::buffer_pool::{BufferPool, TexturePool};
 use crate::context3d::WgpuContext3D;
 use crate::dynamic_transforms::DynamicTransforms;
 use crate::filters::FilterSource;
@@ -10,8 +10,8 @@ use crate::target::{MaybeOwnedBuffer, TextureTarget};
 use crate::target::{RenderTargetFrame, TextureBufferInfo};
 use crate::utils::{BufferDimensions, run_copy_pipeline};
 use crate::{
-    Descriptors, Error, PostProcessQuality, QueueSyncHandle, RenderTarget, SwapChainTarget,
-    Texture, as_texture, format_list, get_backend_names,
+    Descriptors, Error, QueueSyncHandle, RenderTarget, SwapChainTarget, Texture, as_texture,
+    format_list, get_backend_names,
 };
 use image::imageops::FilterType;
 use ruffle_render::backend::{
@@ -33,497 +33,10 @@ use std::any::Any;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::num::NonZeroU32;
-use std::sync::{Arc, mpsc};
-use std::time::Instant;
+use std::sync::Arc;
 use swf::Color;
 use tracing::instrument;
 use wgpu::SubmissionIndex;
-
-/// Minimum batch size limit: never go below 256 instances per batch.
-const MIN_BATCH_LIMIT: usize = 256;
-/// Maximum batch size limit: never exceed the hard-coded original cap.
-const MAX_BATCH_LIMIT: usize = 16_384;
-
-/// Exponential-moving-average smoothing factor for frame-time tracking.
-/// A value of 0.1 weights the most recent frame at 10% and history at 90%,
-/// giving a stable estimate that reacts to sustained load changes within ~10
-/// frames without over-reacting to single-frame spikes.
-const EMA_ALPHA: f64 = 0.1;
-
-/// If the smoothed frame time (ms) exceeds this threshold, reduce batch limits.
-const PRESSURE_THRESHOLD_MS: f64 = 33.0; // ≈30 FPS
-
-/// If the smoothed frame time (ms) is below this threshold, raise batch limits.
-const RELIEF_THRESHOLD_MS: f64 = 20.0; // ≈50 FPS
-
-/// Minimum number of frames that must elapse between consecutive batch-limit
-/// adjustments.  Prevents rapid oscillation when frame time hovers near a
-/// threshold boundary.
-const COOLDOWN_FRAMES: u64 = 10;
-
-/// Fraction of the gap closed per adjustment when the batch limit is being
-/// *reduced* (frame time above PRESSURE_THRESHOLD).  A slightly higher value
-/// (0.25) makes the controller react faster to genuine GPU overload.
-const LERP_STEP_DOWN: f64 = 0.25;
-
-/// Fraction of the gap closed per adjustment when the batch limit is being
-/// *raised* (frame time below RELIEF_THRESHOLD).  A lower value (0.10) makes
-/// recovery deliberately slow: a rapid ramp-up would risk oscillation by
-/// returning to the high limit before the GPU has stabilised, triggering
-/// another pressure reduction immediately after.  Asymmetric rates (faster
-/// down, slower up) are a standard technique in adaptive-rate controllers to
-/// prevent sawtooth behaviour.
-const LERP_STEP_UP: f64 = 0.10;
-
-/// Number of frames the EMA must be running before any batch-limit adjustment
-/// is permitted.  The first few frames often have artificially long durations
-/// (pipeline compilation, asset loading, first-frame overheads) that would
-/// otherwise cause a premature reduction.  Eight frames at 60 FPS ≈ 133 ms —
-/// enough for the EMA (α = 0.1) to incorporate several real samples and for
-/// transient start-up noise to subside.
-const WARMUP_FRAMES: u64 = 8;
-
-// ── GPU timestamp profiling ───────────────────────────────────────────────────
-//
-// When the device supports `TIMESTAMP_QUERY`, each frame writes a pair of
-// timestamps (slot 0 = before drawing, slot 1 = after drawing) into a
-// `QuerySet`.  After submission the resolved 64-bit tick values are copied
-// into a host-visible staging buffer via `resolve_query_set` +
-// `copy_buffer_to_buffer`.  The staging buffer is then mapped asynchronously;
-// the result is read at the *start* of the next frame (by then the GPU has
-// almost always finished and `device.poll(Poll)` can trigger the callback
-// without stalling).
-//
-// This is non-blocking: if the GPU result is not yet ready when the next frame
-// starts, the read is skipped and the previous `last_gpu_ms` value is retained.
-//
-// Rendering output and determinism are completely unaffected — timestamp writes
-// are transparent probes that do not alter draw commands or their ordering.
-
-/// Per-frame GPU timestamp state.
-///
-/// Created once during `WgpuRenderBackend::new` when the device has the
-/// `TIMESTAMP_QUERY` feature; absent (`None`) on platforms that do not support
-/// it (WebGL2, older Vulkan drivers).
-struct GpuTimingState {
-    /// Two-slot query set: slot 0 = frame start, slot 1 = frame end.
-    query_set: wgpu::QuerySet,
-    /// Resolved u64 ticks are written here by `resolve_query_set`.
-    /// Usage: `QUERY_RESOLVE | COPY_SRC`.
-    resolve_buffer: wgpu::Buffer,
-    /// CPU-visible copy of `resolve_buffer`.
-    /// Usage: `COPY_DST | MAP_READ`.
-    map_buffer: wgpu::Buffer,
-    /// GPU ticks → nanoseconds conversion factor, from `queue.get_timestamp_period()`.
-    timestamp_period: f32,
-    /// Channel receiver for the in-flight `map_async` result.
-    /// `None` when the buffer is idle (safe to arm for the next frame).
-    /// `Some(rx)` while a map is in progress (must not reuse `map_buffer`).
-    pending: Option<mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
-}
-
-impl GpuTimingState {
-    /// Create GPU timing state if `TIMESTAMP_QUERY` and
-    /// `TIMESTAMP_QUERY_INSIDE_ENCODERS` are both supported.
-    ///
-    /// `write_timestamp` on a `CommandEncoder` requires
-    /// `TIMESTAMP_QUERY_INSIDE_ENCODERS` (in addition to `TIMESTAMP_QUERY`).
-    /// Some Vulkan drivers (e.g. AMD Vega via the Vulkan backend) expose
-    /// `TIMESTAMP_QUERY` but not `TIMESTAMP_QUERY_INSIDE_ENCODERS`; in that
-    /// case we skip GPU timing entirely rather than panicking at runtime.
-    fn new_if_supported(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> Option<Self> {
-        let required = wgpu::Features::TIMESTAMP_QUERY
-            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
-        if !device.features().contains(required) {
-            return None;
-        }
-        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
-            label: Some("frame_timestamp_query_set"),
-            ty: wgpu::QueryType::Timestamp,
-            count: 2,
-        });
-        // 2 × u64 = 16 bytes
-        let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("timestamp_resolve_buffer"),
-            size: 16,
-            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("timestamp_map_buffer"),
-            size: 16,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        Some(Self {
-            query_set,
-            resolve_buffer,
-            map_buffer,
-            timestamp_period: queue.get_timestamp_period(),
-            pending: None,
-        })
-    }
-
-    /// Try to read the result of the previous frame's `map_async`.
-    ///
-    /// Returns the GPU elapsed time in milliseconds if the result was ready,
-    /// or `None` if the GPU hasn't finished yet (or no read was in flight).
-    ///
-    /// After a successful read the staging buffer is unmapped and
-    /// `self.pending` is cleared so the buffer can be reused this frame.
-    fn try_read_result(&mut self, device: &wgpu::Device) -> Option<f64> {
-        let rx = self.pending.as_ref()?;
-        // Non-blocking poll — fires the map_async callback if the GPU is done.
-        if device.poll(wgpu::PollType::Poll).is_err() {
-            // Polling failed (for example, due to device loss), so this read
-            // will not make progress. Clear the pending state so timing does
-            // not remain stuck waiting forever.
-            self.pending = None;
-            return None;
-        }
-        match rx.try_recv() {
-            Ok(Ok(())) => {
-                // Mapping succeeded: read the two 64-bit tick counts.
-                let range = self.map_buffer.slice(..).get_mapped_range();
-                let ticks: [u64; 2] = {
-                    let bytes: &[u8] = &range;
-                    // Safety: both values are plain u64, guaranteed aligned to
-                    // 8 bytes by the wgpu buffer allocator.
-                    [
-                        u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
-                        u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
-                    ]
-                };
-                drop(range);
-                self.map_buffer.unmap();
-                self.pending = None;
-                let elapsed_ticks = ticks[1].wrapping_sub(ticks[0]);
-                // timestamp_period is nanoseconds per tick.
-                let gpu_ms =
-                    elapsed_ticks as f64 * self.timestamp_period as f64 / 1_000_000.0;
-                Some(gpu_ms)
-            }
-            Ok(Err(_)) => {
-                // Mapping error (device lost etc.) — give up on this read.
-                self.pending = None;
-                None
-            }
-            Err(mpsc::TryRecvError::Empty) => {
-                // GPU not done yet — keep pending, skip this frame.
-                None
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.pending = None;
-                None
-            }
-        }
-    }
-
-    /// Insert timestamp writes + resolve + copy into `encoder`.
-    ///
-    /// Writes slot 0 at the start (before any draw commands) and slot 1 at
-    /// the end (after all draw commands and `staging_belt.finish()`).
-    /// Call `write_start(encoder)` at the start and `write_end_and_resolve(encoder)`
-    /// at the end.  Both calls are no-ops if the buffer is still in use from
-    /// a previous frame.
-    ///
-    /// Returns `true` if timestamps were written (so the caller should arm
-    /// the map_async after submission).
-    fn write_start(&self, encoder: &mut wgpu::CommandEncoder) -> bool {
-        if self.pending.is_some() {
-            // Previous frame's staging buffer is still mapped — skip.
-            return false;
-        }
-        encoder.write_timestamp(&self.query_set, 0);
-        true
-    }
-
-    /// Write the end timestamp + resolve into `resolve_buffer` + copy to
-    /// `map_buffer`.  Must only be called if `write_start` returned `true`.
-    fn write_end_and_resolve(&self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.write_timestamp(&self.query_set, 1);
-        encoder.resolve_query_set(&self.query_set, 0..2, &self.resolve_buffer, 0);
-        encoder.copy_buffer_to_buffer(&self.resolve_buffer, 0, &self.map_buffer, 0, 16);
-    }
-
-    /// Arm the non-blocking readback for the frame that was just submitted.
-    ///
-    /// Calls `map_async` on the staging buffer and stores the receiver.
-    /// A subsequent `device.poll(Poll)` (triggered at the start of the next
-    /// frame by `try_read_result`) will fire the callback when the GPU finishes.
-    fn arm_readback(&mut self) {
-        let (tx, rx) = mpsc::channel();
-        self.map_buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                // Ignore send errors — receiver may have been dropped if the
-                // backend is shut down before this callback fires.
-                let _ = tx.send(result);
-            });
-        self.pending = Some(rx);
-    }
-}
-/// Lightweight adaptive performance tracker.
-///
-/// Measures wall-clock time between consecutive `submit_frame` calls, maintains
-/// a smoothed (EMA) frame time, and derives per-type batch limits (`rect_batch_limit`
-/// and `bitmap_batch_limit`) bounded by `MIN_BATCH_LIMIT` and `MAX_BATCH_LIMIT`.
-///
-/// # Timing breakdown
-///
-/// Three separate measurements are tracked:
-/// * `encode_ms` — time to build and encode all GPU commands (CPU-bound work).
-/// * `smoothed_ms` — EMA-smoothed total frame duration (encode + submit + present).
-/// * `last_gpu_ms` — actual GPU execution time from hardware timestamp queries
-///   (updated once per frame with 1-frame latency; zero until first reading).
-///
-/// # Safety guarantees
-/// * The batch limits only change *how many* instances are packed into a single
-///   GPU draw call before an automatic flush; they never change *which* commands
-///   are issued or *when* a frame is presented.
-/// * ActionScript execution is not touched.
-/// * No frames are skipped or merged.
-struct FrameMetrics {
-    /// Whether at least one frame has been measured.  Used to suppress the EMA
-    /// update on the very first call to `end_frame`, when there is no prior
-    /// sample to incorporate.
-    initialized: bool,
-    /// Exponential moving average of frame duration in milliseconds.
-    smoothed_ms: f64,
-    /// Raw (unsmoothed) duration of the most recent frame in milliseconds.
-    last_raw_ms: f64,
-    /// Time spent encoding GPU commands during the most recent frame (ms).
-    /// Covers command building, staging-belt work, and `chunk_blends` but
-    /// excludes `queue.submit` and driver/GPU work.
-    last_encode_ms: f64,
-    /// GPU execution time for the most recently completed frame, in milliseconds.
-    /// Derived from hardware timestamp queries; updated once per frame with
-    /// one frame of latency.  Zero until the first successful readback.
-    last_gpu_ms: f64,
-    /// Current adaptive batch limit for `DrawRectInstanced` batches.
-    rect_batch_limit: usize,
-    /// Current adaptive batch limit for `DrawBitmapInstanced` batches.
-    bitmap_batch_limit: usize,
-    /// Monotonically increasing count of frames measured so far.
-    frame_index: u64,
-    /// Frame index at which either batch limit was last changed, or `None` if
-    /// no adjustment has been made yet.  `None` bypasses the cooldown so that
-    /// the very first pressure signal is acted on without delay.
-    last_adjust_frame: Option<u64>,
-    /// GPU draw calls (`draw_indexed`) issued during the most recent frame.
-    /// Covers scene-rendering passes (Chunk::Draw, Complex blend, Shader blend)
-    /// but excludes post-process copy passes.
-    draw_call_count: u32,
-    /// New GPU vertex-instance buffer allocations during the most recent frame.
-    buffer_alloc_count: u32,
-}
-
-impl FrameMetrics {
-    fn new() -> Self {
-        Self {
-            initialized: false,
-            smoothed_ms: 16.67, // start assuming 60 FPS
-            last_raw_ms: 16.67,
-            last_encode_ms: 0.0,
-            last_gpu_ms: 0.0,
-            rect_batch_limit: MAX_BATCH_LIMIT,
-            bitmap_batch_limit: MAX_BATCH_LIMIT,
-            frame_index: 0,
-            last_adjust_frame: None,
-            draw_call_count: 0,
-            buffer_alloc_count: 0,
-        }
-    }
-
-    /// Call at the **start** of `submit_frame`.  Returns the `Instant` that
-    /// should be passed to `encode_done` / `end_frame`.
-    fn begin_frame(&mut self) -> Instant {
-        Instant::now()
-    }
-
-    /// Call immediately after command encoding is complete (before
-    /// `queue.submit`).  Records the CPU encode time for the current frame.
-    fn encode_done(&mut self, started_at: Instant) {
-        self.last_encode_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-    }
-
-    /// Call at the **end** of `submit_frame` with the `Instant` from
-    /// `begin_frame`.  Updates the EMA and adjusts both per-type batch limits.
-    fn end_frame(&mut self, started_at: Instant) {
-        let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-        self.last_raw_ms = elapsed_ms;
-
-        if self.initialized {
-            // Update EMA — unchanged from before.
-            self.smoothed_ms =
-                EMA_ALPHA * elapsed_ms + (1.0 - EMA_ALPHA) * self.smoothed_ms;
-
-            // Warm-up gate: skip all adjustments until the EMA has been running
-            // for WARMUP_FRAMES.  The first few frames often carry start-up
-            // overheads (pipeline compilation, asset loading) that inflate
-            // frame time and would otherwise trigger a premature reduction.
-            let warmed_up = self.frame_index >= WARMUP_FRAMES;
-
-            // Cooldown gate: only attempt an adjustment once per COOLDOWN_FRAMES
-            // frames.  This prevents the controller from toggling every frame
-            // when smoothed_ms hovers near a threshold, eliminating oscillation.
-            // `last_adjust_frame = None` means no adjustment has ever been made,
-            // so the first post-warmup pressure signal is acted on immediately.
-            let cooldown_elapsed = self.last_adjust_frame.map_or(true, |last| {
-                self.frame_index.saturating_sub(last) >= COOLDOWN_FRAMES
-            });
-            if warmed_up && cooldown_elapsed {
-                // Each per-type limit is computed independently from its own
-                // current value, sharing only the EMA signal and cooldown
-                // window.  The helper encapsulates the lerp formula so the
-                // logic is not duplicated.
-                let new_rect = Self::compute_new_limit(self.rect_batch_limit, self.smoothed_ms);
-                let new_bitmap =
-                    Self::compute_new_limit(self.bitmap_batch_limit, self.smoothed_ms);
-
-                // Apply and track whether either limit actually changed so the
-                // cooldown window is only anchored to real adjustments.
-                let mut adjusted = false;
-                if let Some(limit) = new_rect {
-                    if limit != self.rect_batch_limit {
-                        self.rect_batch_limit = limit;
-                        adjusted = true;
-                    }
-                }
-                if let Some(limit) = new_bitmap {
-                    if limit != self.bitmap_batch_limit {
-                        self.bitmap_batch_limit = limit;
-                        adjusted = true;
-                    }
-                }
-                if adjusted {
-                    // Record the frame on which the change was made so the
-                    // cooldown window is anchored to actual adjustments.
-                    self.last_adjust_frame = Some(self.frame_index);
-                }
-            }
-        }
-
-        self.initialized = true;
-        self.frame_index = self.frame_index.saturating_add(1);
-    }
-
-    /// Compute the new adaptive limit for a single batch type given its
-    /// current value and the current smoothed frame time.
-    ///
-    /// Shared by both `rect_batch_limit` and `bitmap_batch_limit` so the
-    /// lerp logic is written exactly once.  Returns `None` if no adjustment
-    /// is needed.
-    fn compute_new_limit(current: usize, smoothed_ms: f64) -> Option<usize> {
-        if smoothed_ms > PRESSURE_THRESHOLD_MS {
-            // Under pressure: gradually move toward the minimum limit.
-            // Uses the standard lerp(a, b, t) = a*(1-t) + b*t
-            // formulation so that each adjustment closes LERP_STEP_DOWN
-            // of the remaining gap, giving smooth geometric convergence.
-            // `floor` ensures we always move strictly toward MIN and
-            // that the limit can reach MIN_BATCH_LIMIT exactly when the
-            // gap becomes < 1.0.
-            let new =
-                current as f64 * (1.0 - LERP_STEP_DOWN) + MIN_BATCH_LIMIT as f64 * LERP_STEP_DOWN;
-            Some((new.floor() as usize).max(MIN_BATCH_LIMIT))
-        } else if smoothed_ms < RELIEF_THRESHOLD_MS && current < MAX_BATCH_LIMIT {
-            // Headroom available: gradually recover toward the maximum.
-            // Uses the smaller LERP_STEP_UP so recovery is deliberately
-            // conservative — a fast ramp-up after a pressure event risks
-            // triggering another reduction immediately (sawtooth).
-            // `ceil` ensures we always move strictly toward MAX and that
-            // the limit can reach MAX_BATCH_LIMIT exactly when the
-            // remaining gap shrinks below 1.0, avoiding an infinite
-            // near-ceiling stall.
-            let new =
-                current as f64 * (1.0 - LERP_STEP_UP) + MAX_BATCH_LIMIT as f64 * LERP_STEP_UP;
-            Some((new.ceil() as usize).min(MAX_BATCH_LIMIT))
-        } else {
-            None
-        }
-    }
-
-    /// Returns the rect instanced batch-size limit used by the renderer.
-    ///
-    /// Adaptive batch limits are disabled for determinism. `FrameMetrics` is
-    /// used for monitoring only — the EMA/lerp/cooldown logic in `end_frame`
-    /// still runs and updates `self.rect_batch_limit`, but the stored value is
-    /// not consulted here so rendering output is unaffected by load variance.
-    fn rect_batch_limit(&self) -> usize {
-        MAX_BATCH_LIMIT
-    }
-
-    /// Returns the bitmap instanced batch-size limit used by the renderer.
-    ///
-    /// Adaptive batch limits are disabled for determinism. `FrameMetrics` is
-    /// used for monitoring only — the EMA/lerp/cooldown logic in `end_frame`
-    /// still runs and updates `self.bitmap_batch_limit`, but the stored value
-    /// is not consulted here so rendering output is unaffected by load variance.
-    fn bitmap_batch_limit(&self) -> usize {
-        MAX_BATCH_LIMIT
-    }
-
-    /// Estimated frames per second based on the smoothed frame time.
-    fn fps(&self) -> f64 {
-        if self.smoothed_ms > 0.0 {
-            1000.0 / self.smoothed_ms
-        } else {
-            0.0
-        }
-    }
-
-    /// Smoothed frame time in milliseconds (EMA).
-    fn frame_time_ms(&self) -> f64 {
-        self.smoothed_ms
-    }
-
-    /// CPU command-encoding time for the most recent frame (ms).
-    ///
-    /// Covers `chunk_blends`, staging-belt work, and filter passes.
-    /// The remaining `frame_time_ms - encode_ms` approximates driver/GPU time.
-    fn encode_time_ms(&self) -> f64 {
-        self.last_encode_ms
-    }
-
-    /// GPU execution time for the most recently read timestamp pair (ms).
-    ///
-    /// Updated once per frame with one frame of latency when `TIMESTAMP_QUERY`
-    /// is supported.  Returns `0.0` until the first successful readback or on
-    /// platforms that do not support timestamp queries.
-    fn gpu_time_ms(&self) -> f64 {
-        self.last_gpu_ms
-    }
-
-    /// Update the GPU time metric.  Call after a successful timestamp readback.
-    fn set_gpu_time_ms(&mut self, ms: f64) {
-        self.last_gpu_ms = ms;
-    }
-
-    /// Record per-frame statistics (draw calls and new buffer allocations).
-    /// Call once per frame after all rendering has completed.
-    fn record_frame_stats(&mut self, draw_calls: u32, allocs: u32) {
-        self.draw_call_count = draw_calls;
-        self.buffer_alloc_count = allocs;
-    }
-
-    /// GPU draw calls issued in the most recent frame.
-    fn draw_call_count(&self) -> u32 {
-        self.draw_call_count
-    }
-
-    /// New GPU vertex buffer allocations in the most recent frame.
-    fn buffer_alloc_count(&self) -> u32 {
-        self.buffer_alloc_count
-    }
-}
-
-// GPU-side timing is now implemented via `GpuTimingState` (above).
-// Wall-clock frame time (EMA) is kept as the primary signal for the adaptive
-// batch-limit controller because it is available on all platforms; GPU
-// timestamps supplement it with direct GPU execution time when supported.
 
 /// Creates a wgpu instance with Ruffle's required configuration.
 ///
@@ -563,15 +76,6 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     pub(crate) offscreen_buffer_pool: Arc<BufferPool<wgpu::Buffer, BufferDimensions>>,
     dynamic_transforms: DynamicTransforms,
     active_frame: ActiveFrame,
-    /// Lightweight adaptive performance tracker.  Measures per-frame wall-clock
-    /// time and derives a batch-size limit that is threaded through the rendering
-    /// pipeline.  Has no effect on game logic or ActionScript execution.
-    frame_metrics: FrameMetrics,
-    /// Optional GPU timestamp profiler.  Present when the device supports
-    /// `TIMESTAMP_QUERY`; absent on WebGL2 / older Vulkan drivers.
-    /// Measures actual GPU execution time per frame (not wall-clock time) by
-    /// inserting a before/after timestamp pair around the frame's command buffer.
-    gpu_timing: Option<GpuTimingState>,
 }
 
 impl WgpuRenderBackend<SwapChainTarget> {
@@ -713,7 +217,6 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         let surface = Surface::new(
             &descriptors,
             StageQuality::Low,
-            PostProcessQuality::High,
             target.width(),
             target.height(),
             target.format(),
@@ -732,10 +235,6 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
 
         let transforms = DynamicTransforms::new(&descriptors);
         let active_frame = ActiveFrame::new(&descriptors);
-        let gpu_timing = GpuTimingState::new_if_supported(
-            &descriptors.device,
-            &descriptors.queue,
-        );
 
         Ok(Self {
             descriptors,
@@ -749,8 +248,6 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             offscreen_buffer_pool: Arc::new(offscreen_buffer_pool),
             dynamic_transforms: transforms,
             active_frame,
-            frame_metrics: FrameMetrics::new(),
-            gpu_timing,
         })
     }
 
@@ -914,7 +411,6 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         self.surface = Surface::new(
             &self.descriptors,
             self.surface.quality(),
-            self.surface.post_process_quality(),
             width,
             height,
             self.target.format(),
@@ -922,9 +418,6 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
         self.viewport_scale_factor = dimensions.scale_factor;
         self.texture_pool = TexturePool::new();
-        // Reset the offscreen pool too – stale textures from the old size/format
-        // would never be reused and would waste GPU memory.
-        self.offscreen_texture_pool = TexturePool::new();
     }
 
     fn create_context3d(
@@ -959,41 +452,6 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         result.push(format!("Surface samples: {}", self.surface.sample_count()));
         result.push(format!("Surface size: {:?}", self.surface.size()));
 
-        // ── Performance overlay ───────────────────────────────────────────────
-        result.push(format!(
-            "FPS: {:.1}",
-            self.frame_metrics.fps()
-        ));
-        result.push(format!(
-            "Frame time (avg): {:.2} ms",
-            self.frame_metrics.frame_time_ms()
-        ));
-        result.push(format!(
-            "Encode time (CPU): {:.2} ms",
-            self.frame_metrics.encode_time_ms()
-        ));
-        // GPU time from hardware timestamp queries (1-frame latency).
-        // Shows "N/A" when the device doesn't support TIMESTAMP_QUERY /
-        // TIMESTAMP_QUERY_INSIDE_ENCODERS or before the first successful readback.
-        if self.gpu_timing.is_some() {
-            let gpu_ms = self.frame_metrics.gpu_time_ms();
-            if gpu_ms > 0.0 {
-                result.push(format!("GPU time (ms): {gpu_ms:.2}"));
-            } else {
-                result.push("GPU time (ms): pending".to_string());
-            }
-        } else {
-            result.push("GPU time (ms): N/A (TIMESTAMP_QUERY_INSIDE_ENCODERS not supported)".to_string());
-        }
-        result.push(format!(
-            "Draw calls (scene): {}",
-            self.frame_metrics.draw_call_count()
-        ));
-        result.push(format!(
-            "Instance buf allocs: {}",
-            self.frame_metrics.buffer_alloc_count()
-        ));
-
         Cow::Owned(result.join("\n"))
     }
 
@@ -1014,7 +472,6 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         self.surface = Surface::new(
             &self.descriptors,
             quality,
-            self.surface.post_process_quality(),
             self.surface.size().width,
             self.surface.size().height,
             self.target.format(),
@@ -1046,35 +503,6 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         commands: CommandList,
         cache_entries: Vec<BitmapCacheEntry>,
     ) {
-        // ── Frame-time measurement ────────────────────────────────────────────
-        // Record the wall-clock start so we can measure total frame cost and
-        // update the adaptive batch limits after submission completes.  This is
-        // purely a performance hint; it does not affect game logic or AS3.
-        let frame_start = self.frame_metrics.begin_frame();
-        let rect_batch_limit = self.frame_metrics.rect_batch_limit();
-        let bitmap_batch_limit = self.frame_metrics.bitmap_batch_limit();
-
-        // ── GPU timestamp: try to read previous frame's result ────────────────
-        // Try a non-blocking poll so that the map_async callback from the
-        // *previous* frame can fire.  If the GPU finished in time, read and
-        // store the elapsed ticks; otherwise keep the last value.
-        if let Some(ref mut timer) = self.gpu_timing {
-            if let Some(gpu_ms) = timer.try_read_result(&self.descriptors.device) {
-                self.frame_metrics.set_gpu_time_ms(gpu_ms);
-            }
-        }
-
-        // ── GPU timestamp: slot 0 — before drawing ────────────────────────────
-        // `write_start` returns false if the previous frame's staging buffer is
-        // still mapped (rare: means the GPU didn't finish within one frame).
-        // In that case we skip timestamps for this frame to avoid reusing the
-        // buffer while it's in a mapped state.
-        let timestamps_written = self
-            .gpu_timing
-            .as_ref()
-            .map(|t| t.write_start(&mut self.active_frame.command_encoder))
-            .unwrap_or(false);
-
         let frame_output = match self.target.get_next_texture() {
             Ok(frame) => frame,
             Err(e) => {
@@ -1089,21 +517,17 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             }
         };
 
-        // Accumulate draw calls from cache-entry surfaces (each is a local Surface).
-        let mut cache_entry_draw_calls: u32 = 0;
-
         for entry in cache_entries {
             let texture = as_texture(&entry.handle);
             let mut surface = Surface::new(
                 &self.descriptors,
                 self.surface.quality(),
-                self.surface.post_process_quality(),
                 texture.texture.width(),
                 texture.texture.height(),
                 wgpu::TextureFormat::Rgba8Unorm,
             );
             if entry.filters.is_empty() {
-                let target = surface.draw_commands(
+                surface.draw_commands(
                     RenderTargetMode::ExistingWithColor(
                         texture.texture.clone(),
                         wgpu::Color {
@@ -1116,15 +540,12 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &self.descriptors,
                     &self.meshes,
                     entry.commands,
-                    &mut self.active_frame.belt_ring.current(),
+                    &mut self.active_frame.staging_belt,
                     &self.dynamic_transforms,
                     &mut self.active_frame.command_encoder,
                     LayerRef::None,
                     &mut self.offscreen_texture_pool,
-                    rect_batch_limit,
-                    bitmap_batch_limit,
                 );
-                target.copy_to_existing_texture(&mut self.active_frame.command_encoder);
             } else {
                 // We're relying on there being no impotent filters here,
                 // so that we can safely start by using the actual CAB texture.
@@ -1143,20 +564,18 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &self.descriptors,
                     &self.meshes,
                     entry.commands,
-                    &mut self.active_frame.belt_ring.current(),
+                    &mut self.active_frame.staging_belt,
                     &self.dynamic_transforms,
                     &mut self.active_frame.command_encoder,
                     LayerRef::None,
                     &mut self.offscreen_texture_pool,
-                    rect_batch_limit,
-                    bitmap_batch_limit,
                 );
                 for filter in entry.filters {
                     target = self.descriptors.filters.apply(
                         &self.descriptors,
                         &mut self.active_frame.command_encoder,
                         &mut self.offscreen_texture_pool,
-                        &mut self.active_frame.belt_ring.current(),
+                        &mut self.active_frame.staging_belt,
                         FilterSource::for_entire_texture(target.color_texture()),
                         filter,
                     );
@@ -1173,7 +592,6 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &mut self.active_frame.command_encoder,
                 );
             }
-            cache_entry_draw_calls += surface.draw_call_count();
             // Periodically flush GPU work to prevent OOM when many cache entries
             // accumulate (e.g. when a large container's cacheAsBitmap is skipped
             // but its hundreds of children each have their own bitmap caches).
@@ -1189,67 +607,19 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 a: f64::from(clear.a) / 255.0,
             }),
             &self.descriptors,
-            &mut self.active_frame.belt_ring.current(),
+            &mut self.active_frame.staging_belt,
             &self.dynamic_transforms,
             &mut self.active_frame.command_encoder,
             &self.meshes,
             commands,
             LayerRef::None,
             &mut self.texture_pool,
-            rect_batch_limit,
-            bitmap_batch_limit,
         );
-        self.active_frame.belt_ring.current().finish();
-
-        // ── GPU timestamp: slot 1 — after drawing, resolve + copy ─────────────
-        // Must happen after `staging_belt.finish()` (which finalises the
-        // staging upload commands) so that slot 1 encompasses all GPU work
-        // submitted this frame.  The resolve and copy are part of the same
-        // command buffer and are therefore ordered after all draw commands.
-        if timestamps_written {
-            if let Some(ref timer) = self.gpu_timing {
-                timer.write_end_and_resolve(&mut self.active_frame.command_encoder);
-            }
-        }
-
-        // ── Record CPU encoding time ─────────────────────────────────────────
-        // Capture the timestamp just before we hand command buffers to the
-        // driver so `encode_ms` reflects pure CPU encoding cost and not
-        // driver-side submission or GPU execution time.
-        self.frame_metrics.encode_done(frame_start);
+        self.active_frame.staging_belt.finish();
 
         self.active_frame
             .submit_for_target(&self.descriptors, &self.target, frame_output);
-
-        // ── GPU timestamp: arm non-blocking readback ──────────────────────────
-        // After submission the GPU will eventually complete the timestamp resolve
-        // and copy.  We arm a map_async so that the next frame can read the result
-        // non-blockingly via `try_read_result`.
-        if timestamps_written {
-            if let Some(ref mut timer) = self.gpu_timing {
-                timer.arm_readback();
-            }
-        }
-
-        // Trim the offscreen texture pool rather than clearing it entirely:
-        // keeping textures alive lets the next frame reuse GPU allocations
-        // instead of creating new ones every frame.
-        self.offscreen_texture_pool.purge_if_oversized();
-        // Trim the per-frame vertex-instance buffer pool.
-        self.descriptors.vertex_instance_pool.purge_if_oversized();
-        // Trim the gradient texture cache to prevent unbounded VRAM growth.
-        self.descriptors.purge_gradient_cache_if_oversized();
-
-        // ── Collect per-frame performance stats ───────────────────────────────
-        // Accumulate draw calls from the main surface plus any cache-entry
-        // surfaces (those are local and their counts were tallied inline above).
-        let frame_draw_calls = self.surface.draw_call_count() + cache_entry_draw_calls;
-        let frame_allocs = self.descriptors.vertex_instance_pool.take_alloc_count();
-        self.frame_metrics
-            .record_frame_stats(frame_draw_calls, frame_allocs);
-
-        // ── Update adaptive metrics after the frame has been submitted ────────
-        self.frame_metrics.end_frame(frame_start);
+        self.offscreen_texture_pool = TexturePool::new();
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -1330,11 +700,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             depth_or_array_layers: 1,
         };
 
-        // Avoid forcing an immediate CPU-GPU sync for every texture update.
-        // We only need to flush if there is pending draw work that might alias this texture.
-        if self.active_frame.has_pending_draw_work() {
-            self.active_frame.submit_direct(&self.descriptors);
-        }
+        self.active_frame.submit_direct(&self.descriptors);
         self.descriptors.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture.texture,
@@ -1389,7 +755,6 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         let mut surface = Surface::new(
             &self.descriptors,
             quality,
-            PostProcessQuality::High,
             texture.texture.width(),
             texture.texture.height(),
             wgpu::TextureFormat::Rgba8Unorm,
@@ -1398,15 +763,13 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             frame_output.view(),
             RenderTargetMode::FreshWithTexture(target.get_texture()),
             &self.descriptors,
-            &mut self.active_frame.belt_ring.current(),
+            &mut self.active_frame.staging_belt,
             &self.dynamic_transforms,
             &mut self.active_frame.command_encoder,
             &self.meshes,
             commands,
             LayerRef::Current,
             &mut self.offscreen_texture_pool,
-            self.frame_metrics.rect_batch_limit(),
-            self.frame_metrics.bitmap_batch_limit(),
         );
 
         self.active_frame.maybe_flush(&self.descriptors);
@@ -1462,7 +825,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             &self.descriptors,
             &mut self.active_frame.command_encoder,
             &mut self.offscreen_texture_pool,
-            &mut self.active_frame.belt_ring.current(),
+            &mut self.active_frame.staging_belt,
             FilterSource {
                 texture: &source_texture.texture,
                 point: source_point,
@@ -1771,36 +1134,6 @@ pub async fn request_adapter_and_device(
             }
         })?;
 
-    let info = adapter.get_info();
-    if info.backend == wgpu::Backend::Vulkan {
-        tracing::info!("Explicitly selected Vulkan backend.");
-
-        // Warn when the chosen Vulkan adapter is a compatibility wrapper rather
-        // than a native driver.  These adapters (e.g. the Windows D3D12→Vulkan
-        // translation layer "Microsoft Direct3D12") frequently lack Vulkan
-        // extensions required by Ruffle — notably
-        // `TIMESTAMP_QUERY_INSIDE_ENCODERS` — and can produce texture-layout
-        // validation errors on AMD hardware.  The desktop front-end's
-        // `try_wgpu_backend` already filters them out during back-end selection,
-        // but the wgpu back-end can also be constructed directly (e.g. from
-        // tests or embedder code), so this warning covers that path as well.
-        if info.name.contains("Microsoft Direct3D12") || info.name.contains("WARP") {
-            tracing::warn!(
-                "Selected Vulkan adapter '{}' appears to be a compatibility wrapper \
-                 over another graphics API rather than a native Vulkan driver. \
-                 This may cause validation errors or missing feature support. \
-                 Consider selecting the DX12 or GL back-end instead.",
-                info.name,
-            );
-        }
-    }
-    tracing::info!(
-        "Selected GPU adapter: {} ({:?}) via {:?} backend",
-        info.name,
-        info.device_type,
-        info.backend,
-    );
-
     let (device, queue) = request_device(&adapter).await?;
     Ok((adapter, device, queue))
 }
@@ -1827,15 +1160,6 @@ async fn request_device(
         wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
         wgpu::Features::TEXTURE_COMPRESSION_BC,
         wgpu::Features::FLOAT32_FILTERABLE,
-        // Enable GPU timestamp queries when supported.  Timestamps do not
-        // affect rendered output or determinism; they are read-only probes
-        // used by the performance overlay to report GPU execution time.
-        // Gracefully absent on WebGL2 / older Vulkan drivers.
-        wgpu::Features::TIMESTAMP_QUERY,
-        // Required for `CommandEncoder::write_timestamp`.  Some Vulkan
-        // drivers support `TIMESTAMP_QUERY` but not this extension (e.g.
-        // AMD Vega 3 / RADV).  The timing path is skipped when absent.
-        wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
     ];
 
     for feature in try_features {
@@ -1884,34 +1208,20 @@ impl RenderTargetMode {
 }
 
 pub struct ActiveFrame {
-    /// Ring of staging belts cycled per frame to enable pipelined CPU uploads.
-    /// Having STAGING_BELT_RING_DEPTH (= 3) belts means the CPU can begin
-    /// uploading data for the next frame while the GPU is still consuming the
-    /// previous one, preventing GPU starvation without blocking.
-    pub belt_ring: StagingBeltRing,
+    pub staging_belt: wgpu::util::StagingBelt,
     pub command_encoder: wgpu::CommandEncoder,
     draws_since_flush: u32,
 }
 
 impl ActiveFrame {
-    /// Flush intermediate submissions after this many draws per frame.
-    ///
-    /// A larger value (250) reduces the number of mid-frame `queue.submit`
-    /// calls, which were the primary source of burst latency when this was
-    /// lowered to 100 or 50.  Each premature submit forces a CPU–GPU
-    /// synchronisation point; deferring them to the natural end-of-frame
-    /// boundary keeps the timeline smooth.
-    const MAX_DRAWS_PER_FLUSH: u32 = 250;
+    const MAX_DRAWS_PER_FLUSH: u32 = 100;
 
     pub fn new(descriptors: &Descriptors) -> Self {
         Self {
             command_encoder: descriptors
                 .device
                 .create_command_encoder(&Default::default()),
-            // Triple-buffered staging belt ring: 3 × 4 MiB = 12 MiB total
-            // upload headroom, matching the original single-belt allocation
-            // while enabling pipelined frame uploads.
-            belt_ring: StagingBeltRing::new(STAGING_BELT_RING_DEPTH, 4 * 1024 * 1024),
+            staging_belt: wgpu::util::StagingBelt::new(65536),
             draws_since_flush: 0,
         }
     }
@@ -1923,7 +1233,7 @@ impl ActiveFrame {
         frame: T::Frame,
     ) -> SubmissionIndex {
         self.draws_since_flush = 0;
-        self.belt_ring.current().finish();
+        self.staging_belt.finish();
         let draw_encoder = std::mem::replace(
             &mut self.command_encoder,
             descriptors
@@ -1936,15 +1246,13 @@ impl ActiveFrame {
             Some(draw_encoder.finish()),
             frame,
         );
-        // Advance the ring: schedule reclaim on the belt that was just
-        // submitted and step to the next slot for the following frame.
-        self.belt_ring.recall_and_advance();
+        self.staging_belt.recall();
         index
     }
 
     pub fn submit_direct(&mut self, descriptors: &Descriptors) -> SubmissionIndex {
         self.draws_since_flush = 0;
-        self.belt_ring.current().finish();
+        self.staging_belt.finish();
         let draw_encoder = std::mem::replace(
             &mut self.command_encoder,
             descriptors
@@ -1952,9 +1260,7 @@ impl ActiveFrame {
                 .create_command_encoder(&Default::default()),
         );
         let index = descriptors.queue.submit(Some(draw_encoder.finish()));
-        // Advance the ring after each intermediate flush so mid-frame
-        // submissions also cycle through distinct belt slots.
-        self.belt_ring.recall_and_advance();
+        self.staging_belt.recall();
         index
     }
 
@@ -1968,9 +1274,5 @@ impl ActiveFrame {
         if self.draws_since_flush > Self::MAX_DRAWS_PER_FLUSH {
             self.submit_direct(descriptors);
         }
-    }
-
-    pub fn has_pending_draw_work(&self) -> bool {
-        self.draws_since_flush > 0
     }
 }

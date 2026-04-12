@@ -29,8 +29,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!("cargo:rerun-if-env-changed=CFG_RELEASE_CHANNEL");
-    let channel = sanitize_for_cargo_output(&get_channel());
-    println!("cargo:rustc-env=CFG_RELEASE_CHANNEL={channel}");
+    println!(
+        "cargo:rustc-env=CFG_RELEASE_CHANNEL={channel}",
+        channel = get_channel()
+    );
 
     // Some SWFS have a large amount of recursion (particularly
     // around `goto`s). Increase the stack size on Windows
@@ -59,10 +61,6 @@ fn get_channel() -> Cow<'static, str> {
     }
 }
 
-fn sanitize_for_cargo_output(input: &str) -> String {
-    input.replace(['\n', '\r'], "")
-}
-
 fn set_windows_resource() -> Result<(), Box<dyn Error>> {
     let mut res = winresource::WindowsResource::new();
 
@@ -72,9 +70,8 @@ fn set_windows_resource() -> Result<(), Box<dyn Error>> {
     // Set the application icon
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let icon_path = format!("{manifest_dir}/assets/favicon.ico");
-    let icon_path_for_output = sanitize_for_cargo_output(&icon_path);
 
-    println!("cargo:rerun-if-changed={icon_path_for_output}");
+    println!("cargo:rerun-if-changed={icon_path}");
 
     res.set_icon(&icon_path);
 

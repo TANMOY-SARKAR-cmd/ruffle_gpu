@@ -510,40 +510,10 @@ impl GuiController {
 fn select_wgpu_backend(
     preferred_backends: wgpu::Backends,
 ) -> anyhow::Result<(wgpu::Instance, wgpu::Backends)> {
-    if let Some(raw_override) = std::env::var("WGPU_BACKEND")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-    {
-        if let Some(backend) = parse_backend_override(&raw_override) {
-            if let Some(instance) = try_wgpu_backend(backend) {
-                tracing::info!(
-                    "Selected backend from WGPU_BACKEND={}: {}",
-                    raw_override,
-                    format_list(&get_backend_names(backend), "and")
-                );
-                return Ok((instance, backend));
-            }
-            tracing::warn!(
-                "WGPU_BACKEND={} requested {}, but no compatible adapter was found",
-                raw_override,
-                format_list(&get_backend_names(backend), "and")
-            );
-        } else {
-            tracing::warn!(
-                "Ignoring unsupported WGPU_BACKEND={} (supported: vulkan, metal, dx12, gl, webgpu, primary, secondary)",
-                raw_override
-            );
-        }
-    }
-
-    for backend in prioritized_backends(preferred_backends) {
+    for backend in preferred_backends.iter() {
         if let Some(instance) = try_wgpu_backend(backend) {
             tracing::info!(
                 "Using preferred backend {}",
-                format_list(&get_backend_names(backend), "and")
-            );
-            tracing::info!(
-                "Selected wgpu backend: {}",
                 format_list(&get_backend_names(backend), "and")
             );
             return Ok((instance, backend));
@@ -555,14 +525,10 @@ fn select_wgpu_backend(
         format_list(&get_backend_names(preferred_backends), "or")
     );
 
-    for backend in prioritized_backends(wgpu::Backends::all() - preferred_backends) {
+    for backend in wgpu::Backends::all() - preferred_backends {
         if let Some(instance) = try_wgpu_backend(backend) {
             tracing::info!(
                 "Using fallback backend {}",
-                format_list(&get_backend_names(backend), "and")
-            );
-            tracing::info!(
-                "Selected wgpu backend: {}",
                 format_list(&get_backend_names(backend), "and")
             );
             return Ok((instance, backend));
@@ -574,106 +540,13 @@ fn select_wgpu_backend(
     ))
 }
 
-/// Returns `true` when an adapter is suitable for Ruffle's rendering needs.
-///
-/// Filters out two classes of problematic adapters:
-///
-/// 1. **CPU / software adapters** (WARP, Mesa llvmpipe, …): they lack
-///    hardware acceleration, have severe performance limitations, and often
-///    report only a subset of GPU features, leading to validation errors.
-///
-/// 2. **Vulkan compatibility wrappers** ("Microsoft Direct3D12 on …"): on
-///    Windows, the D3D12 translation layer exposes a Vulkan interface that
-///    is frequently incomplete — notably missing
-///    `TIMESTAMP_QUERY_INSIDE_ENCODERS` and producing texture image-layout
-///    conflicts (RESOURCE vs. COLOR_TARGET) on AMD Vega hardware.  Ruffle
-///    should prefer the native DX12 back-end on Windows instead.
-fn is_adapter_suitable(backend: wgpu::Backends, info: &wgpu::AdapterInfo) -> bool {
-    // Reject pure-software (CPU) adapters unconditionally.
-    if info.device_type == wgpu::DeviceType::Cpu {
-        tracing::debug!(
-            "Skipping CPU/software adapter '{}' on {:?} backend",
-            info.name,
-            backend,
-        );
-        return false;
-    }
-
-    // When the caller is asking for a *native* Vulkan driver, skip adapters
-    // that are thin wrappers over another API.  These are recognisable by
-    // "Microsoft Direct3D12" in the adapter name (the Windows D3D12→Vulkan
-    // compatibility layer) or "WARP" (Windows Advanced Rasterization Platform,
-    // Microsoft's software Vulkan fallback).
-    if backend == wgpu::Backends::VULKAN
-        && (info.name.contains("Microsoft Direct3D12") || info.name.contains("WARP"))
-    {
-        tracing::debug!(
-            "Skipping Vulkan adapter '{}' (compatibility wrapper, not a native Vulkan driver)",
-            info.name,
-        );
-        return false;
-    }
-
-    true
-}
-
 fn try_wgpu_backend(backend: wgpu::Backends) -> Option<wgpu::Instance> {
     let instance = create_wgpu_instance(backend, wgpu::BackendOptions::default());
-    let has_suitable = instance
-        .enumerate_adapters(backend)
-        .iter()
-        .any(|a| is_adapter_suitable(backend, &a.get_info()));
-    if has_suitable {
-        Some(instance)
-    } else {
+    if instance.enumerate_adapters(backend).is_empty() {
         None
+    } else {
+        Some(instance)
     }
-}
-
-fn parse_backend_override(raw: &str) -> Option<wgpu::Backends> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "vulkan" => Some(wgpu::Backends::VULKAN),
-        "metal" => Some(wgpu::Backends::METAL),
-        "dx12" | "d3d12" => Some(wgpu::Backends::DX12),
-        "gl" | "opengl" => Some(wgpu::Backends::GL),
-        "webgpu" | "browser_webgpu" => Some(wgpu::Backends::BROWSER_WEBGPU),
-        "primary" => Some(wgpu::Backends::PRIMARY),
-        "secondary" => Some(wgpu::Backends::SECONDARY),
-        _ => None,
-    }
-}
-
-fn prioritized_backends(backends: wgpu::Backends) -> Vec<wgpu::Backends> {
-    if let Ok(val) = std::env::var("WGPU_BACKEND")
-        && val.to_lowercase() == "vulkan"
-    {
-        return vec![wgpu::Backends::VULKAN];
-    }
-
-    let mut ordered = Vec::new();
-    // Prefer the platform-native backend before Vulkan for best SWF compatibility.
-    // On Windows, Direct3D 12 is more reliable than Vulkan on a wider range of
-    // hardware (many Windows drivers expose Vulkan with partial compliance).
-    // On Apple platforms, Metal is always preferred over Vulkan.
-    // On Linux/other platforms Vulkan is the best primary choice, so it retains
-    // its current position.
-    #[cfg(target_os = "windows")]
-    if backends.contains(wgpu::Backends::DX12) {
-        ordered.push(wgpu::Backends::DX12);
-    }
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    if backends.contains(wgpu::Backends::METAL) {
-        ordered.push(wgpu::Backends::METAL);
-    }
-    if backends.contains(wgpu::Backends::VULKAN) {
-        ordered.push(wgpu::Backends::VULKAN);
-    }
-    for backend in backends.iter() {
-        if !ordered.contains(&backend) {
-            ordered.push(backend);
-        }
-    }
-    ordered
 }
 
 // Load fallback fonts

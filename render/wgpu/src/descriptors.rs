@@ -6,29 +6,10 @@ use crate::{
     BitmapSamplers, Pipelines, PosColorVertex, PosVertex, TextureTransforms,
     create_buffer_with_data,
 };
-use crate::buffer_pool::VertexInstancePool;
 use fnv::FnvHashMap;
 use std::fmt::Debug;
-use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
-use swf::{GradientInterpolation, GradientRecord};
 use wgpu::Backend;
-
-/// Compute a 64-bit FNV-1a hash of a gradient definition without cloning the
-/// records slice.  Used as the gradient texture cache key so that repeated
-/// lookups (common for shared gradient shapes) pay only O(n) hash cost with no
-/// heap allocation, instead of the O(n) clone that a `Vec`-keyed map would require.
-///
-/// Collision probability with FNV-64 over the bounded inputs (≤15 gradient
-/// stops × 5 bytes each) is negligible; Flash's SWF specification caps gradients
-/// at 15 colour stops and this constraint is enforced at the SWF-parser layer
-/// before `gradient_cache_key` is ever called.
-pub(crate) fn gradient_cache_key(interpolation: GradientInterpolation, records: &[GradientRecord]) -> u64 {
-    let mut h = fnv::FnvHasher::default();
-    interpolation.hash(&mut h);
-    records.hash(&mut h);
-    h.finish()
-}
 
 pub struct Descriptors {
     pub wgpu_instance: wgpu::Instance,
@@ -42,30 +23,9 @@ pub struct Descriptors {
     pub quad: Quad,
     copy_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
     copy_srgb_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
-    /// Pipeline cache for the final post-process pass (formats match).
-    post_process_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
-    /// Pipeline cache for the final post-process pass (sRGB surface variant).
-    post_process_srgb_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
     pub shaders: Shaders,
     pipelines: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), Arc<Pipelines>>>,
     pub filters: Filters,
-    /// Pool of reusable `VERTEX | COPY_DST` buffers for per-frame instance data.
-    /// Shared across all rendering paths via `Descriptors`; thread-safe
-    /// through the pool's internal `Mutex`.
-    pub vertex_instance_pool: VertexInstancePool,
-    /// Cache of gradient textures keyed by a pre-computed FNV-1a hash of the
-    /// `(GradientInterpolation, Vec<GradientRecord>)` pair.
-    ///
-    /// Using a pre-hashed `u64` key (computed by [`gradient_cache_key`]) avoids
-    /// the `Vec::clone()` heap allocation that a `Vec`-keyed map would require on
-    /// every lookup — important because gradient lookups occur at shape-register
-    /// time, which is hot for SWFs with many gradient fills.
-    ///
-    /// `wgpu::Texture` is cheaply cloneable (internally `Arc`-backed).
-    ///
-    /// The cache is bounded by [`Self::purge_gradient_cache_if_oversized`],
-    /// which is called at the end of every frame.
-    pub(crate) gradient_texture_cache: Mutex<FnvHashMap<u64, wgpu::Texture>>,
 }
 
 impl Debug for Descriptors {
@@ -101,42 +61,9 @@ impl Descriptors {
             quad,
             copy_pipeline: Default::default(),
             copy_srgb_pipeline: Default::default(),
-            post_process_pipeline: Default::default(),
-            post_process_srgb_pipeline: Default::default(),
             shaders,
             pipelines: Default::default(),
             filters,
-            vertex_instance_pool: VertexInstancePool::new(),
-            gradient_texture_cache: Mutex::new(FnvHashMap::default()),
-        }
-    }
-
-    /// Evict the gradient texture cache once it grows beyond `MAX_ENTRIES`.
-    ///
-    /// Each entry is a 256×1 RGBA8 texture (≈ 1 KiB GPU memory).  The cap
-    /// keeps worst-case VRAM usage bounded at roughly `MAX_ENTRIES` KiB while
-    /// still achieving good reuse across typical SWF content (which tends to
-    /// reuse a small number of gradient definitions).
-    ///
-    /// When the cache exceeds the limit, half of the entries are discarded
-    /// rather than clearing everything, so the most-recently-inserted half
-    /// is retained for the next frame.
-    pub fn purge_gradient_cache_if_oversized(&self) {
-        const MAX_ENTRIES: usize = 256;
-        let mut cache = self
-            .gradient_texture_cache
-            .lock()
-            .expect("gradient_texture_cache lock poisoned");
-        if cache.len() > MAX_ENTRIES {
-            // Retain the most-recently-inserted half instead of clearing all
-            // entries at once.  This avoids a cliff-edge where a SWF with
-            // MAX_ENTRIES+1 unique gradients causes a full-cache miss every frame.
-            let keep = MAX_ENTRIES / 2;
-            let to_remove = cache.len().saturating_sub(keep);
-            let keys_to_remove: Vec<_> = cache.keys().take(to_remove).cloned().collect();
-            for key in keys_to_remove {
-                cache.remove(&key);
-            }
         }
     }
 
@@ -249,143 +176,6 @@ impl Descriptors {
                                 format,
                                 // All of our blending has been done by now, so we want
                                 // to overwrite the target pixels without any blending
-                                blend: Some(wgpu::BlendState::REPLACE),
-                                write_mask: Default::default(),
-                            })],
-                            compilation_options: Default::default(),
-                        }),
-                        primitive: wgpu::PrimitiveState {
-                            topology: wgpu::PrimitiveTopology::TriangleList,
-                            strip_index_format: None,
-                            front_face: wgpu::FrontFace::Ccw,
-                            cull_mode: None,
-                            polygon_mode: wgpu::PolygonMode::default(),
-                            unclipped_depth: false,
-                            conservative: false,
-                        },
-                        depth_stencil: None,
-                        multisample: wgpu::MultisampleState {
-                            count: msaa_sample_count,
-                            mask: !0,
-                            alpha_to_coverage_enabled: false,
-                        },
-                        multiview: None,
-                        cache: None,
-                    })
-            })
-            .clone()
-    }
-
-    /// Returns the post-process pipeline for the given format and sample count.
-    /// This pipeline replaces the plain copy for the scene → swapchain step,
-    /// adding bilinear filtering, FXAA, sharpening, and colour correction.
-    /// Used when the internal format equals the surface format.
-    pub fn post_process_pipeline(
-        &self,
-        format: wgpu::TextureFormat,
-        msaa_sample_count: u32,
-    ) -> wgpu::RenderPipeline {
-        let mut pipelines = self
-            .post_process_pipeline
-            .lock()
-            .expect("Pipelines should not be already locked");
-        pipelines
-            .entry((msaa_sample_count, format))
-            .or_insert_with(|| {
-                let layout = self
-                    .device
-                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: create_debug_label!("Post-process pipeline layout").as_deref(),
-                        bind_group_layouts: &[
-                            &self.bind_layouts.globals,
-                            &self.bind_layouts.transforms,
-                            &self.bind_layouts.bitmap,
-                        ],
-                        push_constant_ranges: &[],
-                    });
-                self.device
-                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: create_debug_label!("Post-process pipeline").as_deref(),
-                        layout: Some(&layout),
-                        vertex: wgpu::VertexState {
-                            module: &self.shaders.post_process_shader,
-                            entry_point: Some("main_vertex"),
-                            buffers: &VERTEX_BUFFERS_DESCRIPTION_POS,
-                            compilation_options: Default::default(),
-                        },
-                        fragment: Some(wgpu::FragmentState {
-                            module: &self.shaders.post_process_shader,
-                            entry_point: Some("main_fragment"),
-                            targets: &[Some(wgpu::ColorTargetState {
-                                format,
-                                blend: Some(wgpu::BlendState::REPLACE),
-                                write_mask: Default::default(),
-                            })],
-                            compilation_options: Default::default(),
-                        }),
-                        primitive: wgpu::PrimitiveState {
-                            topology: wgpu::PrimitiveTopology::TriangleList,
-                            strip_index_format: None,
-                            front_face: wgpu::FrontFace::Ccw,
-                            cull_mode: None,
-                            polygon_mode: wgpu::PolygonMode::default(),
-                            unclipped_depth: false,
-                            conservative: false,
-                        },
-                        depth_stencil: None,
-                        multisample: wgpu::MultisampleState {
-                            count: msaa_sample_count,
-                            mask: !0,
-                            alpha_to_coverage_enabled: false,
-                        },
-                        multiview: None,
-                        cache: None,
-                    })
-            })
-            .clone()
-    }
-
-    /// Returns the post-process pipeline for the given sRGB surface format.
-    /// Identical to `post_process_pipeline` but additionally applies the
-    /// sRGB colour-space conversion before writing to the sRGB swapchain.
-    pub fn post_process_srgb_pipeline(
-        &self,
-        format: wgpu::TextureFormat,
-        msaa_sample_count: u32,
-    ) -> wgpu::RenderPipeline {
-        let mut pipelines = self
-            .post_process_srgb_pipeline
-            .lock()
-            .expect("Pipelines should not be already locked");
-        pipelines
-            .entry((msaa_sample_count, format))
-            .or_insert_with(|| {
-                let layout = self
-                    .device
-                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: create_debug_label!("Post-process sRGB pipeline layout").as_deref(),
-                        bind_group_layouts: &[
-                            &self.bind_layouts.globals,
-                            &self.bind_layouts.transforms,
-                            &self.bind_layouts.bitmap,
-                        ],
-                        push_constant_ranges: &[],
-                    });
-                self.device
-                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: create_debug_label!("Post-process sRGB pipeline").as_deref(),
-                        layout: Some(&layout),
-                        vertex: wgpu::VertexState {
-                            module: &self.shaders.post_process_srgb_shader,
-                            entry_point: Some("main_vertex"),
-                            buffers: &VERTEX_BUFFERS_DESCRIPTION_POS,
-                            compilation_options: Default::default(),
-                        },
-                        fragment: Some(wgpu::FragmentState {
-                            module: &self.shaders.post_process_srgb_shader,
-                            entry_point: Some("main_fragment"),
-                            targets: &[Some(wgpu::ColorTargetState {
-                                format,
                                 blend: Some(wgpu::BlendState::REPLACE),
                                 write_mask: Default::default(),
                             })],

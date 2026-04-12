@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import path from "node:path";
 import crypto from "node:crypto";
 import { setTimeout } from "node:timers/promises";
 import axios from "axios";
@@ -20,19 +19,6 @@ function getJwtToken(apiKey: string, apiSecret: string) {
     return jwt.sign(payload, apiSecret, { algorithm: "HS256" });
 }
 
-function sanitizeExtensionId(extensionId: string) {
-    const trimmed = extensionId.trim();
-    const uuidInBracesPattern =
-        /^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\}$/;
-    const slugPattern = /^[A-Za-z0-9._@-]+$/;
-
-    if (!uuidInBracesPattern.test(trimmed) && !slugPattern.test(trimmed)) {
-        throw new Error("Invalid FIREFOX_EXTENSION_ID format.");
-    }
-
-    return encodeURIComponent(trimmed);
-}
-
 async function submit(
     apiKey: string,
     apiSecret: string,
@@ -46,42 +32,13 @@ async function submit(
     // But since we're already poking directly at the API, might as well do those too...
 
     // For API docs, see: https://mozilla.github.io/addons-server/topics/api/addons.html
-    const safeExtensionId = sanitizeExtensionId(extensionId);
-    const resolvedUnsignedPath = path.resolve(unsignedPath);
-    if (!resolvedUnsignedPath.endsWith(".xpi")) {
-        throw new Error("Unsigned add-on path must be an .xpi file.");
-    }
-    const relUnsignedPath = path.relative(process.cwd(), resolvedUnsignedPath);
-    if (
-        path.isAbsolute(relUnsignedPath) ||
-        relUnsignedPath === ".." ||
-        relUnsignedPath.startsWith(".." + path.sep)
-    ) {
-        throw new Error(
-            "Unsigned add-on path must be within the current working directory.",
-        );
-    }
-    const resolvedSourcePath = path.resolve(sourcePath);
-    if (!resolvedSourcePath.endsWith(".zip")) {
-        throw new Error("Source path must be a .zip file.");
-    }
-    const relSourcePath = path.relative(process.cwd(), resolvedSourcePath);
-    if (
-        path.isAbsolute(relSourcePath) ||
-        relSourcePath === ".." ||
-        relSourcePath.startsWith(".." + path.sep)
-    ) {
-        throw new Error(
-            "Source path must be within the current working directory.",
-        );
-    }
     const client = axios.create({
         baseURL: "https://addons.mozilla.org/api/v5/addons/",
     });
 
     console.log("Checking the status of the last submitted add-on version...");
     const versionsResponse = await client.get(
-        `addon/${safeExtensionId}/versions/`,
+        `addon/${extensionId}/versions/`,
         {
             headers: {
                 Authorization: `JWT ${getJwtToken(apiKey, apiSecret)}`,
@@ -115,7 +72,7 @@ async function submit(
     console.log("Uploading unsigned add-on...");
     const addonFormData = new FormData();
     addonFormData.append("channel", "listed");
-    addonFormData.append("upload", fs.createReadStream(resolvedUnsignedPath));
+    addonFormData.append("upload", fs.createReadStream(unsignedPath));
 
     const addonUploadResponse = await client.postForm(
         "upload/",
@@ -161,7 +118,7 @@ async function submit(
 
     console.log("Creating a new version of the add-on...");
     const createResponse = await client.post(
-        `addon/${safeExtensionId}/versions/`,
+        `addon/${extensionId}/versions/`,
         {
             upload: uploadUuid,
             compatibility: {
@@ -205,10 +162,10 @@ As this is indeed a complicated build process, please let me know if there is an
 
     console.log("Uploading source code...");
     const sourceFormData = new FormData();
-    sourceFormData.append("source", fs.createReadStream(resolvedSourcePath));
+    sourceFormData.append("source", fs.createReadStream(sourcePath));
 
     const sourceUploadResponse = await client.patch(
-        `addon/${safeExtensionId}/versions/${version}/`,
+        `addon/${extensionId}/versions/${version}/`,
         sourceFormData,
         {
             headers: {

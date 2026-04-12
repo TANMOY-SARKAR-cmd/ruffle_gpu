@@ -63,29 +63,6 @@ pub fn raw_texture_as_texture(handle: &dyn RawTexture) -> &wgpu::Texture {
     <dyn Any>::downcast_ref(handle).unwrap()
 }
 
-/// Controls the quality of the final post-processing pass (scene → swapchain).
-///
-/// This only affects the last fullscreen copy; intermediate render passes and
-/// ActionScript execution are never touched.
-///
-/// | Mode  | Sampler  | FXAA | Sharpen | Colour correction |
-/// |-------|----------|------|---------|-------------------|
-/// | `Off` | Nearest  | —    | —       | —                 |
-/// | `Low` | Linear   | —    | —       | —                 |
-/// | `High`| Linear   | ✓    | ✓       | ✓                 |
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PostProcessQuality {
-    /// Plain nearest-neighbour copy — identical to the original pipeline.
-    /// Pixel art and UI remain perfectly sharp; no GPU overhead.
-    #[default]
-    Off,
-    /// Bilinear copy only — no FXAA, no sharpening, no colour correction.
-    /// Smooth scaling without edge processing.
-    Low,
-    /// Full pipeline: bilinear sampling, FXAA, sharpening, colour correction.
-    High,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum MaskState {
     NoMask,
@@ -127,50 +104,6 @@ impl From<TessVertex> for PosVertex {
 struct PosColorVertex {
     position: [f32; 2],
     color: [f32; 4],
-}
-
-/// Per-instance data for the instanced solid-colour rectangle pipeline.
-///
-/// Encodes the 2D affine transform that maps the unit quad [0,1]×[0,1] to
-/// world space, plus a premultiplied RGBA colour.  Layout (40 bytes):
-///   bytes  0–7  : `x_axis`      = [a, b]  — x-axis contribution (column 0 of 2×2 matrix)
-///   bytes  8–15 : `y_axis`      = [c, d]  — y-axis contribution (column 1 of 2×2 matrix)
-///   bytes 16–23 : `translation` = [tx, ty] — world-space translation
-///   bytes 24–39 : `color`       = premultiplied RGBA
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct RectInstance {
-    pub x_axis:      [f32; 2],
-    pub y_axis:      [f32; 2],
-    pub translation: [f32; 2],
-    pub color:       [f32; 4],
-}
-
-/// Per-instance data for the instanced bitmap pipeline.
-///
-/// Encodes the 2D affine transform that maps the unit quad [0,1]×[0,1] to
-/// world space, plus multiplicative and additive color transforms, plus a
-/// UV rectangle that selects which region of the texture to sample.
-/// Layout (72 bytes):
-///   bytes  0–7  : `x_axis`      = [a, b]        — x-axis of the 2D world matrix
-///   bytes  8–15 : `y_axis`      = [c, d]        — y-axis of the 2D world matrix
-///   bytes 16–23 : `translation` = [tx, ty]      — world-space translation
-///   bytes 24–39 : `mult_color`  = [mr, mg, mb, ma] — multiplicative color transform
-///   bytes 40–55 : `add_color`   = [ar, ag, ab, aa] — additive color transform
-///   bytes 56–71 : `uv_rect`     = [u0, v0, uw, vh] — UV sub-rectangle (origin + extent)
-///                 UV for a vertex at `pos` is `uv_rect.xy + pos * uv_rect.zw`.
-///                 Use `[0, 0, 1, 1]` for the full texture.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct BitmapInstance {
-    pub x_axis:      [f32; 2],
-    pub y_axis:      [f32; 2],
-    pub translation: [f32; 2],
-    pub mult_color:  [f32; 4],
-    pub add_color:   [f32; 4],
-    /// UV sub-rectangle: `[u0, v0, width, height]` in normalised texture coordinates.
-    /// A vertex at unit-quad position `pos` samples `uv_rect.xy + pos * uv_rect.zw`.
-    pub uv_rect:     [f32; 4],
 }
 
 impl From<TessVertex> for PosColorVertex {

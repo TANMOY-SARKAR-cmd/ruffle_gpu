@@ -10,7 +10,7 @@ use crate::mesh::Mesh;
 use crate::pixel_bender::{ShaderMode, run_pixelbender_shader_impl};
 use crate::surface::commands::{Chunk, CommandRenderer, chunk_blends};
 use crate::utils::{remove_srgb, supported_sample_count};
-use crate::{Descriptors, MaskState, Pipelines, PostProcessQuality};
+use crate::{Descriptors, MaskState, Pipelines};
 use ruffle_render::commands::CommandList;
 use ruffle_render::pixel_bender_support::{ImageInputTexture, PixelBenderShaderArgument};
 use ruffle_render::quality::StageQuality;
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use target::CommandTarget;
 use tracing::instrument;
 
-use crate::utils::run_post_process_pipeline;
+use crate::utils::run_copy_pipeline;
 
 pub use crate::surface::commands::LayerRef;
 
@@ -28,20 +28,16 @@ use self::commands::ChunkBlendMode;
 pub struct Surface {
     size: wgpu::Extent3d,
     quality: StageQuality,
-    post_process_quality: PostProcessQuality,
     sample_count: u32,
     pipelines: Arc<Pipelines>,
     format: wgpu::TextureFormat,
     actual_surface_format: wgpu::TextureFormat,
-    /// Total GPU draw calls issued during the most recent `draw_commands` call.
-    last_draw_call_count: u32,
 }
 
 impl Surface {
     pub fn new(
         descriptors: &Descriptors,
         quality: StageQuality,
-        post_process_quality: PostProcessQuality,
         width: u32,
         height: u32,
         surface_format: wgpu::TextureFormat,
@@ -62,12 +58,10 @@ impl Surface {
         Self {
             size,
             quality,
-            post_process_quality,
             sample_count,
             pipelines,
             format: frame_buffer_format,
             actual_surface_format: surface_format,
-            last_draw_call_count: 0,
         }
     }
 
@@ -85,8 +79,6 @@ impl Surface {
         commands: CommandList,
         layer: LayerRef,
         texture_pool: &mut TexturePool,
-        rect_batch_limit: usize,
-        bitmap_batch_limit: usize,
     ) {
         let target = self.draw_commands(
             render_target_mode,
@@ -98,11 +90,9 @@ impl Surface {
             draw_encoder,
             layer,
             texture_pool,
-            rect_batch_limit,
-            bitmap_batch_limit,
         );
 
-        run_post_process_pipeline(
+        run_copy_pipeline(
             descriptors,
             self.format,
             self.actual_surface_format,
@@ -112,7 +102,6 @@ impl Surface {
             target.globals(),
             1,
             draw_encoder,
-            self.post_process_quality,
         );
     }
 
@@ -129,8 +118,6 @@ impl Surface {
         draw_encoder: &'frame mut wgpu::CommandEncoder,
         nearest_layer: LayerRef<'frame>,
         texture_pool: &mut TexturePool,
-        rect_batch_limit: usize,
-        bitmap_batch_limit: usize,
     ) -> CommandTarget {
         let target = CommandTarget::new(
             descriptors,
@@ -144,7 +131,6 @@ impl Surface {
 
         let mut num_masks = 0;
         let mut mask_state = MaskState::NoMask;
-        let mut frame_draw_calls: u32 = 0;
         let chunks = chunk_blends(
             commands,
             descriptors,
@@ -160,8 +146,6 @@ impl Surface {
                 layer => layer,
             },
             texture_pool,
-            rect_batch_limit,
-            bitmap_batch_limit,
         );
 
         for chunk in chunks {
@@ -209,7 +193,6 @@ impl Surface {
 
                     num_masks = renderer.num_masks();
                     mask_state = renderer.mask_state();
-                    frame_draw_calls += renderer.draw_call_count();
                 }
                 Chunk::Blend(texture, ChunkBlendMode::Shader(shader), needs_stencil) => {
                     assert!(
@@ -245,8 +228,6 @@ impl Surface {
                         &FilterSource::for_entire_texture(texture.texture()),
                     )
                     .expect("Failed to run PixelBender blend mode");
-                    // run_pixelbender_shader_impl issues one draw_indexed call internally.
-                    frame_draw_calls += 1;
                 }
                 Chunk::Blend(texture, ChunkBlendMode::Complex(blend_mode), needs_stencil) => {
                     let parent = match blend_mode {
@@ -357,7 +338,6 @@ impl Surface {
                     );
 
                     render_pass.draw_indexed(0..6, 0, 0..1);
-                    frame_draw_calls += 1;
                 }
             }
         }
@@ -365,16 +345,11 @@ impl Surface {
         // If nothing happened, ensure it's cleared so we don't operate on garbage data
         target.ensure_cleared(draw_encoder);
 
-        self.last_draw_call_count = frame_draw_calls;
         target
     }
 
     pub fn quality(&self) -> StageQuality {
         self.quality
-    }
-
-    pub fn post_process_quality(&self) -> PostProcessQuality {
-        self.post_process_quality
     }
 
     pub fn sample_count(&self) -> u32 {
@@ -383,13 +358,5 @@ impl Surface {
 
     pub fn size(&self) -> wgpu::Extent3d {
         self.size
-    }
-
-    /// Total GPU `draw_indexed` calls from the most recent `draw_commands` call.
-    /// Includes calls from `Chunk::Draw` (via `CommandRenderer`), `Chunk::Blend(Complex)`,
-    /// and `Chunk::Blend(Shader)` passes.  Post-process copy passes (e.g. the MSAA
-    /// resolve/copy in `draw_commands_and_copy_to`) are not included.
-    pub fn draw_call_count(&self) -> u32 {
-        self.last_draw_call_count
     }
 }
