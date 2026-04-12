@@ -123,14 +123,18 @@ impl OpenH264Codec {
         }
 
         // Validate the directory path to prevent path traversal attacks.
-        if directory
+        // Rebuild the path from its components, rejecting any parent-directory references.
+        let directory = directory
             .components()
-            .any(|c| c == std::path::Component::ParentDir)
-        {
-            return Err(
-                "OpenH264 cache directory path must not contain '..' components".into(),
-            );
-        }
+            .try_fold(std::path::PathBuf::new(), |acc, component| {
+                if component == std::path::Component::ParentDir {
+                    Err("OpenH264 cache directory path must not contain '..' components")
+                } else {
+                    Ok(acc.join(component.as_os_str()))
+                }
+            })
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let directory = directory.as_path();
 
         std::fs::create_dir_all(directory)?;
         let directory = directory.canonicalize()?;
