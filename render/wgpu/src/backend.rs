@@ -1103,7 +1103,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 wgpu::TextureFormat::Rgba8Unorm,
             );
             if entry.filters.is_empty() {
-                surface.draw_commands(
+                let target = surface.draw_commands(
                     RenderTargetMode::ExistingWithColor(
                         texture.texture.clone(),
                         wgpu::Color {
@@ -1124,6 +1124,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     rect_batch_limit,
                     bitmap_batch_limit,
                 );
+                target.copy_to_existing_texture(&mut self.active_frame.command_encoder);
             } else {
                 // We're relying on there being no impotent filters here,
                 // so that we can safely start by using the actual CAB texture.
