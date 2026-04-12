@@ -114,8 +114,33 @@ impl OpenH264Codec {
             openh264_data.download_sha256,
         );
 
+        // Ensure the library filename is a plain file name with no directory components,
+        // preventing path traversal through the (otherwise hardcoded) filename.
+        if Path::new(filename).components().count() != 1 {
+            return Err(
+                "internal error: library filename must not contain path components".into(),
+            );
+        }
+
+        // Validate the directory path to prevent path traversal attacks.
+        if directory
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(
+                "OpenH264 cache directory path must not contain '..' components".into(),
+            );
+        }
+
         std::fs::create_dir_all(directory)?;
+        let directory = directory.canonicalize()?;
         let filepath = directory.join(filename);
+
+        // Verify the resolved filepath remains within the expected directory
+        // as a defense-in-depth measure against path traversal.
+        if !filepath.starts_with(&directory) {
+            return Err("Resolved library path is outside the cache directory".into());
+        }
 
         // If the binary doesn't exist in the expected location, download it.
         if !filepath.is_file() {
@@ -212,13 +237,18 @@ impl H264Decoder {
         let openh264 = h264.openh264.clone();
         let mut decoder: *mut ISVCDecoder = ptr::null_mut();
         unsafe {
-            openh264.WelsCreateDecoder(&mut decoder);
+            let ret = openh264.WelsCreateDecoder(&mut decoder);
+            assert!(
+                ret == 0 && !decoder.is_null(),
+                "OpenH264 WelsCreateDecoder failed (code: {ret})",
+            );
 
-            if decoder.is_null() {
-                panic!("WelsCreateDecoder returned a null pointer");
-            }
-
-            let decoder_vtbl = (*decoder).as_ref().unwrap();
+            // Use as_ref() on the outer pointer to avoid direct raw-pointer dereference,
+            // then check the inner vtable pointer is also non-null.
+            let decoder_vtbl = decoder
+                .as_ref()
+                .and_then(|d| (*d).as_ref())
+                .expect("OpenH264 WelsCreateDecoder returned null decoder or invalid vtable");
 
             let mut dec_param: openh264_sys::SDecodingParam = std::mem::zeroed();
             dec_param.sVideoProperty.eVideoBsType = openh264_sys::VIDEO_BITSTREAM_AVC;
@@ -237,7 +267,11 @@ impl H264Decoder {
 impl Drop for H264Decoder {
     fn drop(&mut self) {
         unsafe {
-            let decoder_vtbl = (*self.decoder).as_ref().unwrap();
+            let decoder_vtbl = self
+                .decoder
+                .as_ref()
+                .and_then(|d| (*d).as_ref())
+                .expect("H264Decoder drop: decoder vtable pointer is null");
 
             (decoder_vtbl.Uninitialize.unwrap())(self.decoder);
             self.openh264.WelsDestroyDecoder(self.decoder);
@@ -260,7 +294,11 @@ impl VideoDecoder for H264Decoder {
 
             self.length_size = (configuration_data[4] & 0b0000_0011) + 1;
 
-            let decoder_vtbl = (*self.decoder).as_ref().unwrap();
+            let decoder_vtbl = self
+                .decoder
+                .as_ref()
+                .and_then(|d| (*d).as_ref())
+                .expect("H264Decoder configure_decoder: decoder vtable pointer is null");
 
             //input: encoded bitstream start position; should include start code prefix
             let mut buffer: Vec<c_uchar> = Vec::new();
@@ -324,7 +362,11 @@ impl VideoDecoder for H264Decoder {
     fn decode_frame(&mut self, encoded_frame: EncodedFrame<'_>) -> Result<DecodedFrame, Error> {
         assert!(self.length_size > 0, "Decoder not configured");
         unsafe {
-            let decoder_vtbl = (*self.decoder).as_ref().unwrap();
+            let decoder_vtbl = self
+                .decoder
+                .as_ref()
+                .and_then(|d| (*d).as_ref())
+                .expect("H264Decoder decode_frame: decoder vtable pointer is null");
 
             // input: encoded bitstream start position; should include start code prefix
             // converting from AVCC (file-like) to Annex B (stream-like) format

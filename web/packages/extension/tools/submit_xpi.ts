@@ -38,6 +38,14 @@ function validateFilePath(
     if (!resolved) {
         throw new Error(`${name} resolves to an empty path.`);
     }
+    // Restrict to within the current working directory to prevent path traversal.
+    const cwd = process.cwd();
+    const cwdWithSep = cwd.endsWith(path.sep) ? cwd : cwd + path.sep;
+    if (resolved !== cwd && !resolved.startsWith(cwdWithSep)) {
+        throw new Error(
+            `${name} must be within the current working directory. Got: ${resolved}`,
+        );
+    }
     if (allowedExtensions) {
         const ext = path.extname(resolved).toLowerCase();
         if (!allowedExtensions.includes(ext)) {
