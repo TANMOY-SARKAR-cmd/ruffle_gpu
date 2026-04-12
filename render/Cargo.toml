@@ -15,11 +15,11 @@ ruffle_wstr = { path = "../wstr" }
 swf = { path = "../swf"}
 pixel_bender = { path = "pixel_bender"}
 tracing = { workspace = true }
-gif = "0.14.1"
+gif = "0.14.2"
 png = "0.18.1"
 flate2 = { workspace = true }
 smallvec = { workspace = true }
-lyon = { version = "1.0.1", optional = true }
+lyon = { version = "1.0.19", optional = true }
 lyon_geom = "1.0.6"
 thiserror = { workspace = true }
 wasm-bindgen = { workspace = true, optional = true }
