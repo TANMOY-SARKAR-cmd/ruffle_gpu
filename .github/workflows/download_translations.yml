@@ -8,6 +8,9 @@ on:
 jobs:
   crowdin:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
 
     if: github.repository == 'ruffle-rs/ruffle'
 

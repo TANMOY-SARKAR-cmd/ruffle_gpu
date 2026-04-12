@@ -14,6 +14,8 @@ jobs:
   editorconfig:
     name: EditorConfig
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     env:
       VERSION: "v3.3.0"
       OS: "linux"
