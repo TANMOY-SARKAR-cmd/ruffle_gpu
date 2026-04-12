@@ -38,16 +38,12 @@ let versionSeal: VersionInformation;
 
 if (process.env["ENABLE_VERSION_SEAL"] === "true") {
     const sealFile = path.resolve(__dirname, "../../../version_seal.json");
-    let sealFileContent: string | null = null;
-    try {
-        sealFileContent = fs.readFileSync(sealFile, { encoding: "utf8" });
-    } catch {
-        // File does not exist yet; it will be created below.
-    }
-    if (sealFileContent !== null) {
+    if (fs.existsSync(sealFile)) {
         console.log("Using version seal");
         // Using the version seal stored previously.
-        versionSeal = JSON.parse(sealFileContent) as VersionInformation;
+        versionSeal = JSON.parse(
+            fs.readFileSync(sealFile, { encoding: "utf8" }),
+        ) as VersionInformation;
 
         versionNumber = versionSeal.version_number;
         versionName = versionSeal.version_name;
@@ -66,7 +62,7 @@ if (process.env["ENABLE_VERSION_SEAL"] === "true") {
             firefox_extension_id: firefoxExtensionId,
         };
 
-        fs.writeFileSync(sealFile, JSON.stringify(versionSeal), { flag: "wx" });
+        fs.writeFileSync(sealFile, JSON.stringify(versionSeal));
     }
 }
 

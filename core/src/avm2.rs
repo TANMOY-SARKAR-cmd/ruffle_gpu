@@ -31,7 +31,6 @@ use crate::tag_utils::SwfMovie;
 use fnv::FnvHashMap;
 use gc_arena::lock::GcRefLock;
 use gc_arena::{Collect, Gc, Mutation};
-use std::collections::HashMap;
 use std::sync::Arc;
 use swf::DoAbc2Flag;
 use swf::avm2::read::Reader;
@@ -194,13 +193,6 @@ pub struct Avm2<'gc> {
     pub debug_output: bool,
 
     pub optimizer_enabled: bool,
-
-    /// Tracks how many times each unique uncaught-error message has been
-    /// emitted.  After `MAX_REPEATED_ERRORS` identical messages the error is
-    /// silently suppressed to prevent infinite log spam (e.g. a
-    /// `ReferenceError #1069` thrown on every mouse-wheel tick).
-    #[collect(require_static)]
-    suppressed_errors: HashMap<String, u32>,
 }
 
 impl<'gc> Avm2<'gc> {
@@ -251,8 +243,6 @@ impl<'gc> Avm2<'gc> {
             debug_output: false,
 
             optimizer_enabled: true,
-
-            suppressed_errors: HashMap::new(),
         }
     }
 
@@ -690,40 +680,12 @@ impl<'gc> Avm2<'gc> {
     #[cold]
     #[inline(never)]
     pub fn uncaught_error(
-        activation: &mut Activation<'_, 'gc>,
+        _activation: &mut Activation<'_, 'gc>,
         _display_object: Option<DisplayObject<'gc>>,
         error: Error<'gc>,
         info: &str,
     ) {
-        /// Number of times the same error message is logged before it is
-        /// suppressed.  Keeps the log readable when a SWF throws the same
-        /// error on every frame/event tick (e.g. `ReferenceError #1069`
-        /// caused by a missing `MouseWheel` handler).
-        const MAX_REPEATED_ERRORS: u32 = 5;
-
-        let dedupe_key = format!("{}: {}", info, error);
-        let count = activation
-            .context
-            .avm2
-            .suppressed_errors
-            .entry(dedupe_key)
-            .or_insert(0);
-        *count += 1;
-
-        match *count {
-            1..=MAX_REPEATED_ERRORS => {
-                tracing::error!("{}: {:?}", info, error);
-            }
-            n if n == MAX_REPEATED_ERRORS + 1 => {
-                tracing::warn!(
-                    "Suppressing further repeated AVM2 error (shown {} times): {}: {:?}",
-                    MAX_REPEATED_ERRORS,
-                    info,
-                    error
-                );
-            }
-            _ => {} // silently suppressed
-        }
+        tracing::error!("{}: {:?}", info, error);
 
         // TODO: push the error onto `loaderInfo.uncaughtErrorEvents`
     }

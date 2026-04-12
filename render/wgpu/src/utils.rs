@@ -1,7 +1,6 @@
 use crate::buffer_pool::BufferDescription;
 use crate::descriptors::Descriptors;
 use crate::globals::Globals;
-use crate::PostProcessQuality;
 use std::borrow::Cow;
 use wgpu::util::DeviceExt;
 use wgpu::{CommandEncoder, TextureFormat};
@@ -259,129 +258,6 @@ pub fn run_copy_pipeline(
 
     render_pass.set_bind_group(1, whole_frame_bind_group, &[0]);
     render_pass.set_bind_group(2, &copy_bind_group, &[]);
-
-    render_pass.set_vertex_buffer(0, descriptors.quad.vertices_pos.slice(..));
-    render_pass.set_index_buffer(
-        descriptors.quad.indices.slice(..),
-        wgpu::IndexFormat::Uint32,
-    );
-
-    render_pass.draw_indexed(0..6, 0, 0..1);
-    drop(render_pass);
-}
-
-/// Runs the GPU post-process pipeline for the final scene → swapchain step.
-///
-/// Selects the pipeline and sampler based on `quality`:
-///
-/// | Quality | Pipeline         | Sampler  | FXAA | Sharpen | Colour correction |
-/// |---------|------------------|----------|------|---------|-------------------|
-/// | `Off`   | copy / copy_srgb | Nearest  | —    | —       | —                 |
-/// | `Low`   | copy / copy_srgb | Linear   | —    | —       | —                 |
-/// | `High`  | post_process*    | Linear   | ✓    | ✓       | ✓                 |
-///
-/// Only the final display copy is routed through this function.  Intermediate
-/// copies (e.g. bitmap-cache entries) continue to use `run_copy_pipeline` so
-/// that game-logic textures are never affected.
-///
-/// Guarantees:
-/// * Single-pass – no extra render targets or frame buffering.
-/// * Zero latency – no async execution path.
-#[expect(clippy::too_many_arguments)]
-pub fn run_post_process_pipeline(
-    descriptors: &Descriptors,
-    format: wgpu::TextureFormat,
-    actual_surface_format: wgpu::TextureFormat,
-    frame_view: &wgpu::TextureView,
-    input: &wgpu::TextureView,
-    whole_frame_bind_group: &wgpu::BindGroup,
-    globals: &Globals,
-    sample_count: u32,
-    encoder: &mut CommandEncoder,
-    quality: PostProcessQuality,
-) {
-    // For Off quality, fall back to the original nearest-sampler copy.
-    if quality == PostProcessQuality::Off {
-        run_copy_pipeline(
-            descriptors,
-            format,
-            actual_surface_format,
-            frame_view,
-            input,
-            whole_frame_bind_group,
-            globals,
-            sample_count,
-            encoder,
-        );
-        return;
-    }
-
-    // Low quality: use the plain copy shader with a linear sampler (bilinear
-    // scaling, no FXAA / sharpen / colour correction).
-    // High quality: use the post_process shader (FXAA + sharpen + colour correction)
-    // with a linear sampler for correct sub-pixel blending.
-    let sampler = &descriptors.bitmap_samplers.clamp_linear;
-
-    let bind_group = descriptors
-        .device
-        .create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &descriptors.bind_layouts.bitmap,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: descriptors.quad.texture_transforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(input),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(sampler),
-                },
-            ],
-            label: create_debug_label!("Post-process bind group").as_deref(),
-        });
-
-    let pipeline = match quality {
-        PostProcessQuality::Off => unreachable!("Off handled above"),
-        PostProcessQuality::Low => {
-            // Reuse the plain copy pipeline with the linear sampler bound above.
-            if actual_surface_format == format {
-                descriptors.copy_pipeline(format, sample_count)
-            } else {
-                descriptors.copy_srgb_pipeline(actual_surface_format, sample_count)
-            }
-        }
-        PostProcessQuality::High => {
-            if actual_surface_format == format {
-                descriptors.post_process_pipeline(format, sample_count)
-            } else {
-                descriptors.post_process_srgb_pipeline(actual_surface_format, sample_count)
-            }
-        }
-    };
-
-    let load = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
-
-    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: create_debug_label!("Post-process to render target").as_deref(),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: frame_view,
-            ops: wgpu::Operations {
-                load,
-                store: wgpu::StoreOp::Store,
-            },
-            resolve_target: None,
-            depth_slice: None,
-        })],
-        ..Default::default()
-    });
-
-    render_pass.set_pipeline(&pipeline);
-    render_pass.set_bind_group(0, globals.bind_group(), &[]);
-    render_pass.set_bind_group(1, whole_frame_bind_group, &[0]);
-    render_pass.set_bind_group(2, &bind_group, &[]);
 
     render_pass.set_vertex_buffer(0, descriptors.quad.vertices_pos.slice(..));
     render_pass.set_index_buffer(

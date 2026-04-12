@@ -109,58 +109,13 @@ impl OpenH264Codec {
         const URL_BASE: &str = "http://ciscobinary.openh264.org/";
         const URL_SUFFIX: &str = ".bz2";
 
-        // Validate the directory path to prevent path traversal attacks.
-        if directory
-            .components()
-            .any(|c| c == std::path::Component::ParentDir)
-        {
-            return Err(
-                "OpenH264 cache directory path must not contain '..' components".into(),
-            );
-        }
-
         let (filename, sha256sum) = (
             openh264_data.download_filename,
             openh264_data.download_sha256,
         );
 
-        // Ensure the library filename is a plain file name with no directory components,
-        // preventing any path traversal through the (otherwise hardcoded) filename.
-        if Path::new(filename).components().count() != 1 {
-            return Err(
-                "internal error: library filename must not contain path components".into(),
-            );
-        }
-
-        // Build a safe directory path by canonicalizing the deepest existing ancestor
-        // and appending the remaining (already validated) path components. This ensures
-        // that symlinks in the existing portion of the path are resolved before we create
-        // any new directories, preventing symlink-based path traversal.
-        let directory = {
-            let mut found_ancestor = None;
-            for ancestor in directory.ancestors() {
-                if ancestor.exists() {
-                    found_ancestor = Some((
-                        ancestor.canonicalize()?,
-                        directory.strip_prefix(ancestor)?.to_path_buf(),
-                    ));
-                    break;
-                }
-            }
-            let (canonical_base, remaining) = found_ancestor
-                .ok_or("cache directory path has no accessible ancestor on the filesystem")?;
-            canonical_base.join(remaining)
-        };
-
-        std::fs::create_dir_all(&directory)?;
-        let directory = directory.canonicalize()?;
+        std::fs::create_dir_all(directory)?;
         let filepath = directory.join(filename);
-
-        // Verify the resolved filepath remains within the expected directory
-        // as a defense-in-depth measure against any remaining path traversal.
-        if !filepath.starts_with(&directory) {
-            return Err("Resolved library path is outside the cache directory".into());
-        }
 
         // If the binary doesn't exist in the expected location, download it.
         if !filepath.is_file() {
@@ -257,19 +212,9 @@ impl H264Decoder {
         let openh264 = h264.openh264.clone();
         let mut decoder: *mut ISVCDecoder = ptr::null_mut();
         unsafe {
-            let ret = openh264.WelsCreateDecoder(&mut decoder);
-            assert!(
-                ret == 0 && !decoder.is_null(),
-                "OpenH264 WelsCreateDecoder failed (code: {})",
-                ret
-            );
+            openh264.WelsCreateDecoder(&mut decoder);
 
-            // Use as_ref() on the outer pointer for an explicit null check before
-            // dereferencing, then null-check the inner vtable pointer as well.
-            let decoder_vtbl = decoder
-                .as_ref()
-                .and_then(|d| (*d).as_ref())
-                .expect("OpenH264 WelsCreateDecoder returned null decoder or invalid vtable");
+            let decoder_vtbl = (*decoder).as_ref().unwrap();
 
             let mut dec_param: openh264_sys::SDecodingParam = std::mem::zeroed();
             dec_param.sVideoProperty.eVideoBsType = openh264_sys::VIDEO_BITSTREAM_AVC;

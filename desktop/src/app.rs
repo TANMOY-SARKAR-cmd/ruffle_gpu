@@ -15,7 +15,7 @@ use ruffle_core::swf::HeaderExt;
 use ruffle_frontend_utils::content::ContentDescriptor;
 use ruffle_render::backend::ViewportDimensions;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Size};
 use winit::event::{ElementState, Ime, KeyEvent, Modifiers, StartCause, WindowEvent};
@@ -40,13 +40,6 @@ struct MainWindow {
     time: Instant,
     next_frame_time: Option<Instant>,
     event_loop_proxy: EventLoopProxy<RuffleEvent>,
-    /// Accumulated wall-clock time not yet consumed by fixed-dt ticks (seconds).
-    accumulator: f64,
-    /// Fixed simulation timestep in seconds.  Defaults to 1/60 s; updated once
-    /// the SWF frame rate is known so the accumulator tracks the SWF clock.
-    fixed_dt: f64,
-    /// Wall-clock time of the last completed frame, used for pacing.
-    last_frame_end: Instant,
 }
 
 impl MainWindow {
@@ -353,14 +346,6 @@ impl MainWindow {
                 scale_factor: viewport_scale_factor,
             });
         }
-
-        // Update the fixed timestep to match the SWF's actual frame rate so
-        // that the accumulator ticks at the correct cadence regardless of
-        // whether the movie runs at 24, 30, or 60 fps.
-        let fps = swf_header.frame_rate().to_f64();
-        if fps > 0.0 {
-            self.fixed_dt = 1.0 / fps;
-        }
     }
 
     fn about_to_wait(&mut self, gilrs: Option<&mut Gilrs>) {
@@ -389,43 +374,13 @@ impl MainWindow {
         // We should look at changing our tick to happen somewhere else if we see any behavioural problems.
         if matches!(self.loaded, LoadingState::Loaded) {
             let new_time = Instant::now();
-            let raw_dt = new_time.duration_since(self.time).as_secs_f64();
-            // Cap the raw delta to 100 ms to prevent the spiral-of-death when
-            // the process was paused (debugger, sleep, background tab, etc.).
-            // Without this, a large accumulated delta causes a burst of ticks
-            // that makes frames jump forward suddenly.
-            let capped_dt = raw_dt.min(0.1);
-            if capped_dt > 0.0 {
+            let dt = FloatDuration::from_std(new_time.duration_since(self.time));
+            if dt.as_millis() > 0.0 {
                 self.time = new_time;
-                self.accumulator += capped_dt;
-
-                // --- Fixed-timestep accumulator loop ---
-                // Consume accumulated time in fixed_dt increments.  This
-                // decouples the render rate from wall-clock jitter: a late
-                // wakeup simply causes one extra tick rather than passing an
-                // inflated dt to the player, which would otherwise manifest as
-                // a visible frame jump.
-                self.next_frame_time = None;
-                while self.accumulator >= self.fixed_dt {
-                    self.next_frame_time = self.player.get().map(|mut player| {
-                        let tick_dt = FloatDuration::from_secs(self.fixed_dt);
-                        player.tick(tick_dt);
-                        Instant::now() + player.time_til_next_frame()
-                    });
-                    self.accumulator -= self.fixed_dt;
-                }
-
-                // If the accumulator hasn't reached a full tick yet (e.g. on
-                // the very first frame or after a very short wakeup), tell
-                // winit when to schedule the next wakeup so the event loop
-                // doesn't busy-spin.  Frame pacing is handled by winit's
-                // ControlFlow::WaitUntil in about_to_wait().
-                if self.next_frame_time.is_none() {
-                    self.next_frame_time =
-                        Some(self.last_frame_end + Duration::from_secs_f64(self.fixed_dt));
-                }
-                self.last_frame_end = Instant::now();
-
+                self.next_frame_time = self.player.get().map(|mut player| {
+                    player.tick(dt);
+                    new_time + player.time_til_next_frame()
+                });
                 self.check_redraw();
             }
         }
@@ -593,9 +548,6 @@ impl ApplicationHandler<RuffleEvent> for App {
                 time: Instant::now(),
                 next_frame_time: None,
                 event_loop_proxy,
-                accumulator: 0.0,
-                fixed_dt: 1.0 / 60.0,
-                last_frame_end: Instant::now(),
             });
         }
     }

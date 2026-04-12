@@ -524,28 +524,10 @@ impl Player {
             return;
         }
 
+        self.frame_accumulator += dt;
         let frame_duration = self.frame_duration();
-        let frame_duration_ms = frame_duration.as_millis();
-
-        // Clamp very large host deltas (window drag, debugger pause, tab/background wakeups)
-        // so we don't accumulate a huge burst that causes visible stutter.
-        const MAX_CATCHUP_MS: f64 = 50.0;
-        let dt_ms = dt.as_millis();
-        let clamped_dt_ms = if dt_ms.is_finite() {
-            dt_ms.clamp(0.0, MAX_CATCHUP_MS)
-        } else {
-            0.0
-        };
-        self.frame_accumulator += FloatDuration::from_millis(clamped_dt_ms);
 
         let max_frames_per_tick = self.max_frames_per_tick();
-        if frame_duration_ms > 0.0 {
-            let max_accumulator_ms = frame_duration_ms * (max_frames_per_tick as f64 + 1.0);
-            if self.frame_accumulator.as_millis() > max_accumulator_ms {
-                self.frame_accumulator = FloatDuration::from_millis(max_accumulator_ms);
-            }
-        }
-
         let mut frame = 0;
 
         while frame < max_frames_per_tick && self.frame_accumulator >= frame_duration {
@@ -581,10 +563,10 @@ impl Player {
         // so timer callbacks won't get cancelled/delayed.
         self.time_offset = 0;
 
-        // Keep only frame remainder to avoid frame bursts and preserve stable pacing.
-        if frame_duration_ms > 0.0 && self.frame_accumulator >= frame_duration {
-            let remainder = self.frame_accumulator.as_millis() % frame_duration_ms;
-            self.frame_accumulator = FloatDuration::from_millis(remainder);
+        // Sanity: If we had too many frames to tick, just reset the accumulator
+        // to prevent running at turbo speed.
+        if self.frame_accumulator >= frame_duration {
+            self.frame_accumulator = FloatDuration::ZERO;
         }
 
         // Adjust playback speed for next frame to stay in sync with timeline audio tracks ("stream" sounds).
@@ -2048,17 +2030,12 @@ impl Player {
             }
         });
 
-        // Don't force a redraw when nothing in the display list changed.
-        self.needs_render = self.enter_arena(|_, gc_root, _| gc_root.stage.invalidated());
+        self.needs_render = true;
     }
 
     #[instrument(level = "debug", skip_all)]
     pub fn render(&mut self) {
         let invalidated = self.enter_arena(|_, gc_root, _| gc_root.stage.invalidated());
-
-        if !invalidated && !self.needs_render {
-            return;
-        }
 
         if invalidated {
             self.update(|context| {
@@ -2487,6 +2464,7 @@ impl Player {
             if let Some(callback) = context.external_interface.get_callback(name) {
                 callback.call(context, name, args)
             } else {
+                tracing::warn!("Calling unknown internal interface: {}", name);
                 ExternalValue::Null
             }
         })
