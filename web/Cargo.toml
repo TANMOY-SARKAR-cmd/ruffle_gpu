@@ -58,7 +58,7 @@ gloo-net =  { version = "0.6.0", default-features = false, features = ["websocke
 rfd = { workspace = true, features = ["file-handle-inner"] }
 wasm-streams = "0.5.0"
 futures = { workspace = true }
-zip = { version = "8.5.0", default-features = false }
+zip = { version = "8.5.1", default-features = false }
 
 [dependencies.ruffle_core]
 path = "../core"
@@ -78,7 +78,7 @@ features = [
 ]
 
 [target.'cfg(target_family = "wasm")'.dependencies.getrandom]
-version = "0.3"
+version = "0.4"
 features = ["wasm_js"]
 
 [package.metadata.cargo-machete]
