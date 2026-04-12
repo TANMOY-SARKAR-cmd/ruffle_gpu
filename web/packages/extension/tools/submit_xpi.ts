@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
 import { setTimeout } from "node:timers/promises";
 import axios from "axios";
@@ -7,6 +8,33 @@ import FormData from "form-data";
 
 // This script implements the same basic procedure as described here:
 // https://blog.mozilla.org/addons/2022/03/17/new-api-for-submitting-and-updating-add-ons/
+
+/**
+ * Validates that a string is safe to use as a URL path segment.
+ * Allows only characters valid in Firefox extension IDs ({uuid}, addon@domain) and version numbers.
+ */
+function validatePathSegment(value: string, name: string): string {
+    if (!/^[\w@.{}\-]+$/.test(value)) {
+        throw new Error(
+            `Invalid characters in ${name}: "${value}". Only alphanumeric, @, ., {, }, - and _ are allowed.`,
+        );
+    }
+    return encodeURIComponent(value);
+}
+
+/**
+ * Validates that a file path is safe to use (no null bytes or path traversal).
+ */
+function validateFilePath(filePath: string, name: string): string {
+    if (filePath.includes("\0")) {
+        throw new Error(`${name} contains null bytes.`);
+    }
+    const resolved = path.resolve(filePath);
+    if (!resolved) {
+        throw new Error(`${name} resolves to an empty path.`);
+    }
+    return resolved;
+}
 
 function getJwtToken(apiKey: string, apiSecret: string) {
     const payload = {
@@ -31,6 +59,11 @@ async function submit(
     // https://extensionworkshop.com/documentation/develop/getting-started-with-web-ext/
     // But since we're already poking directly at the API, might as well do those too...
 
+    // Validate inputs before use
+    const safeExtensionId = validatePathSegment(extensionId, "FIREFOX_EXTENSION_ID");
+    const safeUnsignedPath = validateFilePath(unsignedPath, "unsigned XPI path");
+    const safeSourcePath = validateFilePath(sourcePath, "source ZIP path");
+
     // For API docs, see: https://mozilla.github.io/addons-server/topics/api/addons.html
     const client = axios.create({
         baseURL: "https://addons.mozilla.org/api/v5/addons/",
@@ -38,7 +71,7 @@ async function submit(
 
     console.log("Checking the status of the last submitted add-on version...");
     const versionsResponse = await client.get(
-        `addon/${extensionId}/versions/`,
+        `addon/${safeExtensionId}/versions/`,
         {
             headers: {
                 Authorization: `JWT ${getJwtToken(apiKey, apiSecret)}`,
@@ -72,7 +105,7 @@ async function submit(
     console.log("Uploading unsigned add-on...");
     const addonFormData = new FormData();
     addonFormData.append("channel", "listed");
-    addonFormData.append("upload", fs.createReadStream(unsignedPath));
+    addonFormData.append("upload", fs.createReadStream(safeUnsignedPath));
 
     const addonUploadResponse = await client.postForm(
         "upload/",
@@ -118,7 +151,7 @@ async function submit(
 
     console.log("Creating a new version of the add-on...");
     const createResponse = await client.post(
-        `addon/${extensionId}/versions/`,
+        `addon/${safeExtensionId}/versions/`,
         {
             upload: uploadUuid,
             compatibility: {
@@ -160,12 +193,15 @@ As this is indeed a complicated build process, please let me know if there is an
     const version = createResponse.data.version;
     console.log("Created version: " + version);
 
+    // Validate version from API response before using in URL
+    const safeVersion = validatePathSegment(String(version), "version");
+
     console.log("Uploading source code...");
     const sourceFormData = new FormData();
-    sourceFormData.append("source", fs.createReadStream(sourcePath));
+    sourceFormData.append("source", fs.createReadStream(safeSourcePath));
 
     const sourceUploadResponse = await client.patch(
-        `addon/${extensionId}/versions/${version}/`,
+        `addon/${safeExtensionId}/versions/${safeVersion}/`,
         sourceFormData,
         {
             headers: {

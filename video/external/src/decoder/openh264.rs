@@ -214,6 +214,8 @@ impl H264Decoder {
         unsafe {
             openh264.WelsCreateDecoder(&mut decoder);
 
+            assert!(!decoder.is_null(), "WelsCreateDecoder returned a null pointer");
+
             let decoder_vtbl = (*decoder).as_ref().unwrap();
 
             let mut dec_param: openh264_sys::SDecodingParam = std::mem::zeroed();

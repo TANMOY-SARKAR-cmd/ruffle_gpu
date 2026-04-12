@@ -38,7 +38,7 @@ let versionSeal: VersionInformation;
 
 if (process.env["ENABLE_VERSION_SEAL"] === "true") {
     const sealFile = path.resolve(__dirname, "../../../version_seal.json");
-    if (fs.existsSync(sealFile)) {
+    try {
         console.log("Using version seal");
         // Using the version seal stored previously.
         versionSeal = JSON.parse(
@@ -50,7 +50,10 @@ if (process.env["ENABLE_VERSION_SEAL"] === "true") {
         versionChannel = versionSeal.version_channel;
         buildDate = versionSeal.build_date;
         commitHash = versionSeal.commitHash;
-    } else {
+    } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw err;
+        }
         console.log("Creating version seal");
         versionSeal = {
             version_number: versionNumber,
@@ -62,7 +65,7 @@ if (process.env["ENABLE_VERSION_SEAL"] === "true") {
             firefox_extension_id: firefoxExtensionId,
         };
 
-        fs.writeFileSync(sealFile, JSON.stringify(versionSeal));
+        fs.writeFileSync(sealFile, JSON.stringify(versionSeal), { flag: "wx" });
     }
 }
 

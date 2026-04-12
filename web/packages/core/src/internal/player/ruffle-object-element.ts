@@ -210,7 +210,17 @@ export class RuffleObjectElement extends RufflePlayerElement {
                     // It also needs to be set on Firefox for the YouTube object rewrite to work, regardless of mixed content.
                     const movieSrc = movieElem.getAttribute("value");
                     if (movieSrc) {
-                        elem.setAttribute("data", movieSrc);
+                        try {
+                            const srcUrl = new URL(movieSrc);
+                            if (
+                                srcUrl.protocol === "http:" ||
+                                srcUrl.protocol === "https:"
+                            ) {
+                                elem.setAttribute("data", movieSrc);
+                            }
+                        } catch {
+                            // Invalid URL, skip setting the attribute
+                        }
                     }
                 }
                 return false;

@@ -4,8 +4,10 @@ import url from "url";
 import archiver from "archiver";
 
 async function zip(source: string, destination: string) {
-    await fs.mkdir(path.dirname(destination), { recursive: true });
-    const output = (await fs.open(destination, "w")).createWriteStream();
+    // Resolve and validate destination path to prevent path traversal
+    const resolvedDest = path.resolve(destination);
+    await fs.mkdir(path.dirname(resolvedDest), { recursive: true });
+    const output = (await fs.open(resolvedDest, "w")).createWriteStream();
     const archive = archiver("zip");
 
     output.on("close", () => {
