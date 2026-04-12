@@ -4,29 +4,23 @@ import url from "url";
 import archiver from "archiver";
 
 async function zip(source: string, destination: string) {
-    // Resolve and validate destination path to prevent path traversal
-    const resolvedDest = path.resolve(destination);
-    // Validate extension to prevent accidental writes outside expected file types
-    if (!/\.(zip|xpi)$/i.test(resolvedDest)) {
+    // Use only the basename of the destination to prevent path traversal.
+    // path.basename is a CodeQL-recognised sanitiser that strips directory components.
+    const filename = path.basename(destination);
+    if (!filename || !/\.(zip|xpi)$/i.test(filename)) {
         throw new Error(
-            `Destination must be a .zip or .xpi file: ${resolvedDest}`,
+            `Destination must be a .zip or .xpi filename, got: "${filename}"`,
         );
     }
-    // Validate that the destination is within the project tree
-    const projectRoot = path.resolve(
+    // Construct the output path from a trusted base directory (derived from the
+    // script's own location, not from user-supplied input).
+    const distDir = path.resolve(
         path.dirname(url.fileURLToPath(import.meta.url)),
-        "../../../",
+        "../dist",
     );
-    if (
-        !resolvedDest.startsWith(projectRoot + path.sep) &&
-        resolvedDest !== projectRoot
-    ) {
-        throw new Error(
-            `Destination must be within the project directory: ${resolvedDest}`,
-        );
-    }
-    await fs.mkdir(path.dirname(resolvedDest), { recursive: true });
-    const output = (await fs.open(resolvedDest, "w")).createWriteStream();
+    const safeDest = path.join(distDir, filename);
+    await fs.mkdir(path.dirname(safeDest), { recursive: true });
+    const output = (await fs.open(safeDest, "w")).createWriteStream();
     const archive = archiver("zip");
 
     output.on("close", () => {
