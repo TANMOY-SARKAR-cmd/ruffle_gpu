@@ -46,13 +46,13 @@ jobs:
           echo "is_active=$is_active" >> $GITHUB_OUTPUT
 
       - name: Install cargo-edit
-        uses: baptiste0928/cargo-install@v3
+        uses: baptiste0928/cargo-install@f204293d9709061b7bc1756fec3ec4e2cd57dec0 # v3
         with:
           crate: cargo-edit
           version: '^0.13'
 
       - name: Install cargo-get
-        uses: baptiste0928/cargo-install@v3
+        uses: baptiste0928/cargo-install@f204293d9709061b7bc1756fec3ec4e2cd57dec0 # v3
         with:
           crate: cargo-get
           version: '^1.0'
@@ -79,7 +79,7 @@ jobs:
           $RELEASE_SCRIPT tag-and-push
 
       - name: Get current time with underscores
-        uses: josStorer/get-current-time@v2.1.2
+        uses: josStorer/get-current-time@060cae3fbd32c181c6841788189a601ac8df8389 # v2.1.2
         id: current_time_underscores
         with:
           format: YYYY_MM_DD
@@ -145,7 +145,7 @@ jobs:
           ref: ${{ needs.create-nightly-release.outputs.tag_name }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -342,7 +342,7 @@ jobs:
           ref: ${{ needs.create-nightly-release.outputs.tag_name }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
 
@@ -375,7 +375,7 @@ jobs:
           ref: ${{ needs.create-nightly-release.outputs.tag_name }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
@@ -396,7 +396,7 @@ jobs:
       # Keep the version number in sync in all workflows,
       # and in the extension builder Dockerfile!
       - name: Install wasm-opt
-        uses: sigoden/install-binary@v1
+        uses: sigoden/install-binary@7eb4b088aedf19fe9b2bc6c6bbdc12379ffb355c # v1
         with:
           repo: WebAssembly/binaryen
           tag: version_126
@@ -477,7 +477,7 @@ jobs:
         continue-on-error: true
         env:
           CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
-        uses: mnao305/chrome-extension-upload@v6.0.0
+        uses: mnao305/chrome-extension-upload@fdfe79400af990f5145a319e834aee64907ccff4 # v6.0.0
         with:
           extension-id: ${{ secrets.CHROME_EXTENSION_ID }}
           client-id: ${{ secrets.CHROME_CLIENT_ID }}
@@ -491,7 +491,7 @@ jobs:
         continue-on-error: true
         env:
           EDGE_PRODUCT_ID: ${{ secrets.EDGE_PRODUCT_ID }}
-        uses: wdzeng/edge-addon@v2
+        uses: wdzeng/edge-addon@d4db1eea77297a24d799394dec87e8912e0902f9 # v2
         with:
           product-id: ${{ secrets.EDGE_PRODUCT_ID }}
           zip-path: ./web/packages/extension/dist/ruffle_extension.zip
@@ -560,7 +560,7 @@ jobs:
 
       - name: Push JS docs
         if: github.repository == 'ruffle-rs/ruffle'
-        uses: ad-m/github-push-action@master
+        uses: ad-m/github-push-action@4cc74773234f74829a8c21bc4d69dd4be9cfa599 # master
         with:
           repository: ruffle-rs/js-docs
           github_token: ${{ secrets.RUFFLE_BUILD_TOKEN }}
@@ -596,7 +596,7 @@ jobs:
 
       - name: Push web demo
         if: github.repository == 'ruffle-rs/ruffle'
-        uses: ad-m/github-push-action@master
+        uses: ad-m/github-push-action@4cc74773234f74829a8c21bc4d69dd4be9cfa599 # master
         with:
           repository: ruffle-rs/demo
           github_token: ${{ secrets.RUFFLE_BUILD_TOKEN }}
@@ -614,13 +614,13 @@ jobs:
           ref: ${{ needs.create-nightly-release.outputs.tag_name }}
 
       - name: Get current time with dashes
-        uses: josStorer/get-current-time@v2.1.2
+        uses: josStorer/get-current-time@060cae3fbd32c181c6841788189a601ac8df8389 # v2.1.2
         id: current_time_dashes
         with:
           format: YYYY-MM-DD
 
       - name: Get current time with dots
-        uses: josStorer/get-current-time@v2.1.2
+        uses: josStorer/get-current-time@060cae3fbd32c181c6841788189a601ac8df8389 # v2.1.2
         id: current_time_dots
         with:
           format: YYYY.M.D
@@ -640,7 +640,7 @@ jobs:
           -e "s/@SHA512SUM_aarch64@/$(sha512sum ${{ needs.create-nightly-release.outputs.package_prefix }}-linux-aarch64.tar.gz | cut -d' ' -f1)/"
 
       - name: Publish AUR package
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.2
+        uses: KSXGitHub/github-actions-deploy-aur@abe8ac26b51011c88be58c8809fd2ac674068ea5 # v4.1.2
         with:
           pkgname: ruffle-nightly-bin
           pkgbuild: desktop/packages/linux/aur/ruffle-nightly-bin/PKGBUILD

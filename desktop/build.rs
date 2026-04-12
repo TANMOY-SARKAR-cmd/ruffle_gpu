@@ -71,7 +71,9 @@ fn set_windows_resource() -> Result<(), Box<dyn Error>> {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let icon_path = format!("{manifest_dir}/assets/favicon.ico");
 
-    println!("cargo:rerun-if-changed={icon_path}");
+    // Sanitize path to prevent log injection via embedded newlines
+    let safe_path = icon_path.replace(['\n', '\r'], "");
+    println!("cargo:rerun-if-changed={safe_path}");
 
     res.set_icon(&icon_path);
 

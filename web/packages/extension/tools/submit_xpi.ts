@@ -24,14 +24,27 @@ function validatePathSegment(value: string, name: string): string {
 
 /**
  * Validates that a file path is safe to use (no null bytes or path traversal).
+ * Optionally validates that the file has one of the given extensions.
  */
-function validateFilePath(filePath: string, name: string): string {
+function validateFilePath(
+    filePath: string,
+    name: string,
+    allowedExtensions?: string[],
+): string {
     if (filePath.includes("\0")) {
         throw new Error(`${name} contains null bytes.`);
     }
     const resolved = path.resolve(filePath);
     if (!resolved) {
         throw new Error(`${name} resolves to an empty path.`);
+    }
+    if (allowedExtensions) {
+        const ext = path.extname(resolved).toLowerCase();
+        if (!allowedExtensions.includes(ext)) {
+            throw new Error(
+                `${name} must have one of these extensions: ${allowedExtensions.join(", ")}. Got: ${ext}`,
+            );
+        }
     }
     return resolved;
 }
@@ -61,8 +74,8 @@ async function submit(
 
     // Validate inputs before use
     const safeExtensionId = validatePathSegment(extensionId, "FIREFOX_EXTENSION_ID");
-    const safeUnsignedPath = validateFilePath(unsignedPath, "unsigned XPI path");
-    const safeSourcePath = validateFilePath(sourcePath, "source ZIP path");
+    const safeUnsignedPath = validateFilePath(unsignedPath, "unsigned XPI path", [".xpi"]);
+    const safeSourcePath = validateFilePath(sourcePath, "source ZIP path", [".zip"]);
 
     // For API docs, see: https://mozilla.github.io/addons-server/topics/api/addons.html
     const client = axios.create({

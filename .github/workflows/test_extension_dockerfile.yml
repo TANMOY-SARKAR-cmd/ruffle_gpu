@@ -12,12 +12,14 @@ jobs:
   test-dockerfile:
     name: Test the Dockerfile
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
@@ -35,7 +37,7 @@ jobs:
       # Keep the version number in sync in all workflows,
       # and in the extension builder Dockerfile!
       - name: Install wasm-opt
-        uses: sigoden/install-binary@v1
+        uses: sigoden/install-binary@7eb4b088aedf19fe9b2bc6c6bbdc12379ffb355c # v1
         with:
           repo: WebAssembly/binaryen
           tag: version_126
@@ -95,7 +97,7 @@ jobs:
           path: firefox_extensions/
 
       - name: Notify Discord
-        uses: th0th/notify-discord@v0.4.1
+        uses: th0th/notify-discord@fda1438555e7291c8771107fa28654119606e679 # v0.4.1
         if: ${{ always() && github.repository == 'ruffle-rs/ruffle' }}
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_UPDATES }}

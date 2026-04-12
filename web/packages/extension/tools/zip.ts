@@ -6,6 +6,25 @@ import archiver from "archiver";
 async function zip(source: string, destination: string) {
     // Resolve and validate destination path to prevent path traversal
     const resolvedDest = path.resolve(destination);
+    // Validate extension to prevent accidental writes outside expected file types
+    if (!/\.(zip|xpi)$/i.test(resolvedDest)) {
+        throw new Error(
+            `Destination must be a .zip or .xpi file: ${resolvedDest}`,
+        );
+    }
+    // Validate that the destination is within the project tree
+    const projectRoot = path.resolve(
+        path.dirname(url.fileURLToPath(import.meta.url)),
+        "../../../",
+    );
+    if (
+        !resolvedDest.startsWith(projectRoot + path.sep) &&
+        resolvedDest !== projectRoot
+    ) {
+        throw new Error(
+            `Destination must be within the project directory: ${resolvedDest}`,
+        );
+    }
     await fs.mkdir(path.dirname(resolvedDest), { recursive: true });
     const output = (await fs.open(resolvedDest, "w")).createWriteStream();
     const archive = archiver("zip");

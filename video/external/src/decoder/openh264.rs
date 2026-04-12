@@ -214,7 +214,9 @@ impl H264Decoder {
         unsafe {
             openh264.WelsCreateDecoder(&mut decoder);
 
-            assert!(!decoder.is_null(), "WelsCreateDecoder returned a null pointer");
+            if decoder.is_null() {
+                panic!("WelsCreateDecoder returned a null pointer");
+            }
 
             let decoder_vtbl = (*decoder).as_ref().unwrap();
 

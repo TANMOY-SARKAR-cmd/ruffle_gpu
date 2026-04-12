@@ -8,6 +8,8 @@ on:
 jobs:
   crowdin:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
 
     if: github.repository == 'ruffle-rs/ruffle'
 
@@ -33,7 +35,7 @@ jobs:
           path: desktop/packages/linux/locale
 
       - name: Crowdin push
-        uses: crowdin/github-action@v2
+        uses: crowdin/github-action@7ca9c452bfe9197d3bb7fa83a4d7e2b0c9ae835d # v2
         with:
           config: 'crowdin.yml'
           upload_sources: true
