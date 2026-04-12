@@ -1,5 +1,5 @@
 use crate::buffer_builder::BufferBuilder;
-use crate::buffer_pool::{BufferPool, TexturePool};
+use crate::buffer_pool::{BufferPool, StagingBeltRing, TexturePool, STAGING_BELT_RING_DEPTH};
 use crate::context3d::WgpuContext3D;
 use crate::dynamic_transforms::DynamicTransforms;
 use crate::filters::FilterSource;
@@ -1116,7 +1116,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &self.descriptors,
                     &self.meshes,
                     entry.commands,
-                    &mut self.active_frame.staging_belt,
+                    &mut self.active_frame.belt_ring.current(),
                     &self.dynamic_transforms,
                     &mut self.active_frame.command_encoder,
                     LayerRef::None,
@@ -1143,7 +1143,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     &self.descriptors,
                     &self.meshes,
                     entry.commands,
-                    &mut self.active_frame.staging_belt,
+                    &mut self.active_frame.belt_ring.current(),
                     &self.dynamic_transforms,
                     &mut self.active_frame.command_encoder,
                     LayerRef::None,
@@ -1156,7 +1156,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                         &self.descriptors,
                         &mut self.active_frame.command_encoder,
                         &mut self.offscreen_texture_pool,
-                        &mut self.active_frame.staging_belt,
+                        &mut self.active_frame.belt_ring.current(),
                         FilterSource::for_entire_texture(target.color_texture()),
                         filter,
                     );
@@ -1189,7 +1189,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 a: f64::from(clear.a) / 255.0,
             }),
             &self.descriptors,
-            &mut self.active_frame.staging_belt,
+            &mut self.active_frame.belt_ring.current(),
             &self.dynamic_transforms,
             &mut self.active_frame.command_encoder,
             &self.meshes,
@@ -1199,7 +1199,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             rect_batch_limit,
             bitmap_batch_limit,
         );
-        self.active_frame.staging_belt.finish();
+        self.active_frame.belt_ring.current().finish();
 
         // ── GPU timestamp: slot 1 — after drawing, resolve + copy ─────────────
         // Must happen after `staging_belt.finish()` (which finalises the
@@ -1398,7 +1398,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             frame_output.view(),
             RenderTargetMode::FreshWithTexture(target.get_texture()),
             &self.descriptors,
-            &mut self.active_frame.staging_belt,
+            &mut self.active_frame.belt_ring.current(),
             &self.dynamic_transforms,
             &mut self.active_frame.command_encoder,
             &self.meshes,
@@ -1462,7 +1462,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             &self.descriptors,
             &mut self.active_frame.command_encoder,
             &mut self.offscreen_texture_pool,
-            &mut self.active_frame.staging_belt,
+            &mut self.active_frame.belt_ring.current(),
             FilterSource {
                 texture: &source_texture.texture,
                 point: source_point,
@@ -1884,20 +1884,34 @@ impl RenderTargetMode {
 }
 
 pub struct ActiveFrame {
-    pub staging_belt: wgpu::util::StagingBelt,
+    /// Ring of staging belts cycled per frame to enable pipelined CPU uploads.
+    /// Having STAGING_BELT_RING_DEPTH (= 3) belts means the CPU can begin
+    /// uploading data for the next frame while the GPU is still consuming the
+    /// previous one, preventing GPU starvation without blocking.
+    pub belt_ring: StagingBeltRing,
     pub command_encoder: wgpu::CommandEncoder,
     draws_since_flush: u32,
 }
 
 impl ActiveFrame {
-    const MAX_DRAWS_PER_FLUSH: u32 = 100;
+    /// Flush intermediate submissions after this many draws per frame.
+    ///
+    /// A larger value (250) reduces the number of mid-frame `queue.submit`
+    /// calls, which were the primary source of burst latency when this was
+    /// lowered to 100 or 50.  Each premature submit forces a CPU–GPU
+    /// synchronisation point; deferring them to the natural end-of-frame
+    /// boundary keeps the timeline smooth.
+    const MAX_DRAWS_PER_FLUSH: u32 = 250;
 
     pub fn new(descriptors: &Descriptors) -> Self {
         Self {
             command_encoder: descriptors
                 .device
                 .create_command_encoder(&Default::default()),
-            staging_belt: wgpu::util::StagingBelt::new(4 * 1024 * 1024),
+            // Triple-buffered staging belt ring: 3 × 4 MiB = 12 MiB total
+            // upload headroom, matching the original single-belt allocation
+            // while enabling pipelined frame uploads.
+            belt_ring: StagingBeltRing::new(STAGING_BELT_RING_DEPTH, 4 * 1024 * 1024),
             draws_since_flush: 0,
         }
     }
@@ -1909,7 +1923,7 @@ impl ActiveFrame {
         frame: T::Frame,
     ) -> SubmissionIndex {
         self.draws_since_flush = 0;
-        self.staging_belt.finish();
+        self.belt_ring.current().finish();
         let draw_encoder = std::mem::replace(
             &mut self.command_encoder,
             descriptors
@@ -1922,13 +1936,15 @@ impl ActiveFrame {
             Some(draw_encoder.finish()),
             frame,
         );
-        self.staging_belt.recall();
+        // Advance the ring: schedule reclaim on the belt that was just
+        // submitted and step to the next slot for the following frame.
+        self.belt_ring.recall_and_advance();
         index
     }
 
     pub fn submit_direct(&mut self, descriptors: &Descriptors) -> SubmissionIndex {
         self.draws_since_flush = 0;
-        self.staging_belt.finish();
+        self.belt_ring.current().finish();
         let draw_encoder = std::mem::replace(
             &mut self.command_encoder,
             descriptors
@@ -1936,7 +1952,9 @@ impl ActiveFrame {
                 .create_command_encoder(&Default::default()),
         );
         let index = descriptors.queue.submit(Some(draw_encoder.finish()));
-        self.staging_belt.recall();
+        // Advance the ring after each intermediate flush so mid-frame
+        // submissions also cycle through distinct belt slots.
+        self.belt_ring.recall_and_advance();
         index
     }
 
