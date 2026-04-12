@@ -37,7 +37,7 @@ jobs:
       # Rust toolchain + wasm32-unknown-unknown target are required by the
       # web build (packages/core invokes `cargo build --target wasm32-unknown-unknown`).
       - name: Setup Rust (needed for wasm build)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           targets: wasm32-unknown-unknown
       - run: npm ci
