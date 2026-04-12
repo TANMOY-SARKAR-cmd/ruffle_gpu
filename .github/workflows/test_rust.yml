@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: AurorNZ/paths-filter@v5
+      - uses: AurorNZ/paths-filter@c9dd42e99db87803313ff6f4b1150cc9f6c836af # v5
         id: filter
         with:
           filters: |
@@ -94,7 +94,7 @@ jobs:
         run: echo FEATURES=${FEATURES},imgtests | tee -a $GITHUB_ENV
 
       - name: Cache Cargo output
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: "desktop"
           save-if: ${{ github.ref == 'refs/heads/master' }}

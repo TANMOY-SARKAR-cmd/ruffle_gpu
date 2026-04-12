@@ -97,7 +97,7 @@ jobs:
           path: firefox_extensions/
 
       - name: Notify Discord
-        uses: th0th/notify-discord@v0.4.1
+        uses: th0th/notify-discord@fda1438555e7291c8771107fa28654119606e679 # v0.4.1
         if: ${{ always() && github.repository == 'ruffle-rs/ruffle' }}
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_UPDATES }}

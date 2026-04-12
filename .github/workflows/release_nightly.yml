@@ -46,13 +46,13 @@ jobs:
           echo "is_active=$is_active" >> $GITHUB_OUTPUT
 
       - name: Install cargo-edit
-        uses: baptiste0928/cargo-install@v3
+        uses: baptiste0928/cargo-install@f204293d9709061b7bc1756fec3ec4e2cd57dec0 # v3
         with:
           crate: cargo-edit
           version: '^0.13'
 
       - name: Install cargo-get
-        uses: baptiste0928/cargo-install@v3
+        uses: baptiste0928/cargo-install@f204293d9709061b7bc1756fec3ec4e2cd57dec0 # v3
         with:
           crate: cargo-get
           version: '^1.0'

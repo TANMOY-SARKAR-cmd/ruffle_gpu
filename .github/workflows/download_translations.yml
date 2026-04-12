@@ -40,7 +40,7 @@ jobs:
           mkdir -p locale/rs.ruffle.Ruffle.metainfo.xml
 
       - name: Crowdin download
-        uses: crowdin/github-action@v2
+        uses: crowdin/github-action@7ca9c452bfe9197d3bb7fa83a4d7e2b0c9ae835d # v2
         with:
           config: 'crowdin.yml'
           upload_sources: false
@@ -70,7 +70,7 @@ jobs:
           git commit -m 'chore: Update translations from Crowdin'
 
       - name: Push
-        uses: ad-m/github-push-action@master
+        uses: ad-m/github-push-action@4cc74773234f74829a8c21bc4d69dd4be9cfa599 # master
         with:
           branch: l10n_crowdin_translations
           github_token: ${{ secrets.RUFFLE_BUILD_TOKEN }}
