@@ -238,11 +238,30 @@ impl CommandTarget {
         let whole_frame_bind_group = OnceCell::new();
 
         let (frame_buffer, resolve_buffer) =
-            if let RenderTargetMode::ExistingWithColor(texture, _) = &render_target_mode {
+            if let RenderTargetMode::ExistingWithColor(_, _) = &render_target_mode {
                 if sample_count > 1 {
+                    // Use a pooled MSAA frame buffer and a pooled resolve buffer instead
+                    // of the CAB texture directly as the resolve target.  In wgpu 27+
+                    // the resolve target has COLOR_TARGET usage for the entire render
+                    // pass scope.  If any draw command within that pass also samples the
+                    // same texture (e.g. a Bitmap child whose bitmapData shares the same
+                    // underlying texture), wgpu detects the exclusive-usage conflict and
+                    // raises a fatal panic.  Using a pooled resolve buffer avoids placing
+                    // the CAB texture in the render-pass scope at all; the caller is
+                    // responsible for copying the resolved result back to the original
+                    // texture via `copy_to_existing_texture`.
                     (
                         make_pooled_frame_buffer(),
-                        Some(ResolveBuffer::new_manual(texture.clone())),
+                        Some(ResolveBuffer::new(
+                            descriptors,
+                            size,
+                            format,
+                            wgpu::TextureUsages::COPY_SRC
+                                | wgpu::TextureUsages::COPY_DST
+                                | wgpu::TextureUsages::TEXTURE_BINDING
+                                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                            pool,
+                        )),
                     )
                 } else {
                     // Use a pooled frame buffer instead of the texture directly.
@@ -353,19 +372,30 @@ impl CommandTarget {
             .unwrap_or_else(|| self.frame_buffer.take_texture())
     }
 
-    /// For `ExistingWithColor` targets with `sample_count == 1`, the rendered
-    /// content ends up in the pooled frame buffer rather than in the original
-    /// texture.  Call this after all rendering is complete to copy the pool
-    /// texture's contents back into the original `ExistingWithColor` texture.
+    /// For `ExistingWithColor` targets, the rendered content ends up in a
+    /// pooled texture rather than in the original CAB texture.  Call this
+    /// after all rendering is complete to copy the pool texture's contents
+    /// back into the original `ExistingWithColor` texture.
     ///
-    /// For MSAA targets the resolve already writes into the original texture as
-    /// the render-pass resolve target, so no extra copy is needed.  For all
-    /// other `RenderTargetMode` variants this is a no-op.
+    /// - Non-MSAA: copies from the pooled frame buffer to the original texture.
+    /// - MSAA: copies from the pooled resolve buffer (the MSAA resolve
+    ///   destination) to the original texture.  The resolve itself is handled
+    ///   automatically by the render pass, but the resolved result lands in the
+    ///   pooled resolve buffer, not in the original texture.
+    /// - All other `RenderTargetMode` variants: no-op.
     pub fn copy_to_existing_texture(&self, encoder: &mut wgpu::CommandEncoder) {
         if let RenderTargetMode::ExistingWithColor(texture, _) = &self.render_target_mode {
             if self.sample_count == 1 {
                 encoder.copy_texture_to_texture(
                     self.frame_buffer.texture().as_image_copy(),
+                    texture.as_image_copy(),
+                    self.size,
+                );
+            } else if let Some(resolve_buffer) = &self.resolve_buffer {
+                // MSAA: the render pass resolves into the pooled resolve buffer;
+                // copy that result to the original CAB texture.
+                encoder.copy_texture_to_texture(
+                    resolve_buffer.texture().as_image_copy(),
                     texture.as_image_copy(),
                     self.size,
                 );
