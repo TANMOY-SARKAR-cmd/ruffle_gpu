@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   FEATURES: lzma,jpegxr
   TEST_OPTS: --workspace --locked --no-fail-fast -j 4

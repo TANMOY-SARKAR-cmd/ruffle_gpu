@@ -88,7 +88,7 @@ describe("URL Rewrite Rules", () => {
         await browser.waitUntil(
             async () => {
                 return (await browser.getUrl()).startsWith(
-                    "https://www.example.com",
+                    "https://www.example.com/",
                 );
             },
             {

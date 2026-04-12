@@ -8,6 +8,9 @@ on:
   # Allow for manual dispatch on GitHub
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   RELEASE_SCRIPT: ./.github/scripts/release.py
 
