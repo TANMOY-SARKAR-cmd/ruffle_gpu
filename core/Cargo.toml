@@ -56,7 +56,7 @@ hashbrown = { workspace = true }
 scopeguard = "1.2.0"
 fluent-templates = { workspace = true }
 egui = { workspace = true, optional = true }
-egui_extras = { version = "0.33.3", default-features = false, optional = true }
+egui_extras = { version = "0.34.1", default-features = false, optional = true }
 png = { version = "0.18.1", optional = true }
 flv-rs = { path = "../flv" }
 async-channel = { workspace = true }
@@ -69,7 +69,7 @@ unicode-segmentation = "1.13.2"
 id3 = "1.16.4"
 either = "1.15.0"
 chardetng = "0.1.17"
-tracy-client = { version = "0.18.2", optional = true, default-features = false }
+tracy-client = { version = "0.18.4", optional = true, default-features = false }
 itertools = "0.14.0"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies.futures]
