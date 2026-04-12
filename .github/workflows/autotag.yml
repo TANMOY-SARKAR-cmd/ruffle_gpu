@@ -1,0 +1,47 @@
+name: Auto Tag
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Cargo.toml'
+
+permissions:
+  contents: write
+
+jobs:
+  autotag:
+    name: Create Tag on Version Change
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Get current version
+        id: current_version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Get previous version
+        id: previous_version
+        run: |
+          git checkout HEAD~1 -- Cargo.toml 2>/dev/null || echo "No previous Cargo.toml"
+          PREV_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/' 2>/dev/null || echo "")
+          echo "version=$PREV_VERSION" >> $GITHUB_OUTPUT
+          git checkout HEAD -- Cargo.toml
+
+      - name: Create tag if version changed
+        if: steps.current_version.outputs.version != steps.previous_version.outputs.version && steps.current_version.outputs.version != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="v${{ steps.current_version.outputs.version }}"
+          echo "Creating tag $VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$VERSION"
+          git push origin "$VERSION"
