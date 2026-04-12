@@ -4772,7 +4772,7 @@ version = "0.1.0"
 dependencies = [
  "fnv",
  "gc-arena",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.0",
  "quick-xml",
  "regress",
  "ruffle_macros",
@@ -4810,7 +4810,7 @@ dependencies = [
  "fnv",
  "futures",
  "gc-arena",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.0",
  "id3",
  "image",
  "indexmap",
