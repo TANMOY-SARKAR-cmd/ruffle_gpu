@@ -90,6 +90,7 @@ impl MenuBar {
         }
     }
 
+    #[allow(deprecated)]
     pub fn show(
         &mut self,
         locale: &LanguageIdentifier,

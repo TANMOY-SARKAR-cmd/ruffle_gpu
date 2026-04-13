@@ -1,7 +1,6 @@
 #![cfg(target_os = "linux")]
 //! Types and methods utilized for communicating with D-Bus
 
-use std::mem;
 use std::sync::{Arc, Mutex};
 
 use ashpd::desktop::settings::{ColorScheme, Settings};
@@ -72,7 +71,7 @@ impl GameModeGuard {
 
 impl Drop for GameModeGuard {
     fn drop(&mut self) {
-        if let Some(gamemode) = mem::take(&mut self.gamemode) {
+        if let Some(gamemode) = self.gamemode.take() {
             tokio::spawn(async move {
                 if let Err(err) = gamemode.unregister(std::process::id()).await {
                     tracing::warn!("Failed to unregister a game with gamemode: {}", err)
