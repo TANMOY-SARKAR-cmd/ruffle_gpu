@@ -22,7 +22,6 @@ use std::path::Path;
 use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant};
 use url::Url;
-use wgpu::SurfaceError;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::EventLoopProxy;
@@ -305,8 +304,9 @@ impl GuiController {
 
     pub fn render(&mut self, mut player: Option<MutexGuard<Player>>) {
         let surface_texture = match self.surface.get_current_texture() {
-            Ok(surface_texture) => surface_texture,
-            Err(e @ (SurfaceError::Lost | SurfaceError::Outdated)) => {
+            wgpu::CurrentSurfaceTexture::Success(surface_texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => surface_texture,
+            e @ (wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated) => {
                 // Reconfigure the surface if lost or outdated.
                 // Some sources suggest ignoring `Outdated` and waiting for the next frame,
                 // but I suspect this advice is related explicitly to resizing,
@@ -319,28 +319,25 @@ impl GuiController {
                 self.reconfigure_surface();
                 return;
             }
-            Err(e @ SurfaceError::Timeout) => {
-                // An operation related to the surface took too long to complete.
-                // This error may happen due to many reasons (GPU overload, GPU driver bugs, etc.),
-                // the best thing we can do is skip a frame and wait.
+            e @ (wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Occluded) => {
+                // An operation related to the surface took too long to complete or the window
+                // is occluded. This may happen due to many reasons (GPU overload, GPU driver
+                // bugs, etc.), the best thing we can do is skip a frame and wait.
                 tracing::warn!("Surface became unavailable: {:?}, skipping a frame", e);
                 return;
             }
-            Err(SurfaceError::OutOfMemory) => {
-                // Cannot help with that :(
-                panic!("wgpu: Out of memory: no more memory left to allocate a new frame");
-            }
-            Err(SurfaceError::Other) => {
-                // Generic error, not much we can do.
-                panic!("wgpu: Acquiring a texture failed with a generic error");
+            wgpu::CurrentSurfaceTexture::Validation => {
+                // A validation error was raised; the application should attend to it and retry.
+                panic!("wgpu: Acquiring a texture failed with a validation error");
             }
         };
 
         let raw_input = self.egui_winit.take_egui_input(&self.window);
         let show_menu = self.window.fullscreen().is_none() && !self.no_gui;
-        let mut full_output = self.egui_winit.egui_ctx().run(raw_input, |context| {
+        let mut full_output = self.egui_winit.egui_ctx().run_ui(raw_input, |ui| {
             self.gui.update(
-                context,
+                &*ui,
                 show_menu,
                 player.as_deref_mut(),
                 if show_menu {
@@ -357,7 +354,7 @@ impl GuiController {
             .repaint_delay;
 
         // If we're not in a UI, tell egui which cursor we prefer to use instead
-        if !self.egui_winit.egui_ctx().wants_pointer_input()
+        if !self.egui_winit.egui_ctx().egui_wants_pointer_input()
             && let Some(player) = player.as_deref()
         {
             full_output.platform_output.cursor_icon =
@@ -542,7 +539,7 @@ fn select_wgpu_backend(
 
 fn try_wgpu_backend(backend: wgpu::Backends) -> Option<wgpu::Instance> {
     let instance = create_wgpu_instance(backend, wgpu::BackendOptions::default());
-    if instance.enumerate_adapters(backend).is_empty() {
+    if futures::executor::block_on(instance.enumerate_adapters(backend)).is_empty() {
         None
     } else {
         Some(instance)

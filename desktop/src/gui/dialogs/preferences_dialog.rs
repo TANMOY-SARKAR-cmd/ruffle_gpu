@@ -65,8 +65,8 @@ impl PreferencesDialog {
         let mut available_output_devices = Vec::new();
         if let Ok(devices) = audio_host.output_devices() {
             for device in devices {
-                if let Ok(name) = device.name() {
-                    available_output_devices.push(name);
+                if let Ok(desc) = device.description() {
+                    available_output_devices.push(desc.name().to_string());
                 }
             }
         }
@@ -465,7 +465,7 @@ impl PreferencesDialog {
             if ui.small_button(text(locale, "show-license")).clicked() {
                 self.openh264_license_visible = true;
             };
-            let available_size = egui_ctx.available_rect().size();
+            let available_size = egui_ctx.viewport_rect().size();
             egui::Window::new(text(locale, "openh264-license"))
                 .collapsible(false)
                 .resizable(false)
@@ -701,7 +701,7 @@ fn ime_enabled_name(locale: &LanguageIdentifier, ime_enabled: Option<bool>) -> C
 }
 
 fn backend_availability(instance: &wgpu::Instance, backend: wgpu::Backends) -> wgpu::Backends {
-    if instance.enumerate_adapters(backend).is_empty() {
+    if futures::executor::block_on(instance.enumerate_adapters(backend)).is_empty() {
         wgpu::Backends::empty()
     } else {
         backend
