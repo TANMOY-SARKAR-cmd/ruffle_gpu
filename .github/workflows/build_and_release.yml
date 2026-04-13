@@ -21,27 +21,27 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_name: ruffle_gpu-linux-x86_64.tar.gz
+            artifact_name: ruffle_gpu-linux-x86_64
             build_cmd: |
               sudo apt-get update
               sudo apt-get install -y pkg-config libasound2-dev libudev-dev
               cargo build --release --verbose
-              tar -czf ruffle_gpu-linux-x86_64.tar.gz -C target/release ruffle_desktop 2>/dev/null || \
-              tar -czf ruffle_gpu-linux-x86_64.tar.gz -C target/release $(ls target/release | grep -E '^ruffle' | head -1)
+              cp target/release/ruffle_desktop ruffle_gpu-linux-x86_64 2>/dev/null || \
+              cp target/release/$(ls target/release | grep -E '^ruffle[^.]*$' | head -1) ruffle_gpu-linux-x86_64
 
           - os: windows-latest
-            artifact_name: ruffle_gpu-windows-x86_64.zip
+            artifact_name: ruffle_gpu-windows-x86_64.exe
             build_cmd: |
               cargo build --release --verbose
               $binary = Get-ChildItem target/release -Filter "ruffle*.exe" | Select-Object -First 1
-              Compress-Archive -Path "target/release/$($binary.Name)" -DestinationPath "ruffle_gpu-windows-x86_64.zip"
+              Copy-Item "target/release/$($binary.Name)" -Destination "ruffle_gpu-windows-x86_64.exe"
 
           - os: macos-latest
-            artifact_name: ruffle_gpu-macos-x86_64.tar.gz
+            artifact_name: ruffle_gpu-macos-x86_64
             build_cmd: |
               cargo build --release --verbose
-              tar -czf ruffle_gpu-macos-x86_64.tar.gz -C target/release ruffle_desktop 2>/dev/null || \
-              tar -czf ruffle_gpu-macos-x86_64.tar.gz -C target/release $(ls target/release | grep '^ruffle' | head -1)
+              cp target/release/ruffle_desktop ruffle_gpu-macos-x86_64 2>/dev/null || \
+              cp target/release/$(ls target/release | grep -E '^ruffle[^.]*$' | head -1) ruffle_gpu-macos-x86_64
 
     steps:
       - uses: actions/checkout@v4
