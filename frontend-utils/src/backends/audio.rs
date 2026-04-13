@@ -46,7 +46,7 @@ impl CpalAudioBackend {
             .map_err(CpalError::DefaultStream)?;
         let sample_format = config.sample_format();
         let config = cpal::StreamConfig::from(config);
-        let mixer = AudioMixer::new(config.channels as u8, config.sample_rate.0);
+        let mixer = AudioMixer::new(config.channels as u8, config.sample_rate);
 
         // Start the audio stream.
         let stream = {
@@ -115,7 +115,7 @@ fn get_suitable_output_device(
     if let Some(preferred_device_name) = preferred_device_name
         && let Ok(mut devices) = host.output_devices()
         && let Some(device) =
-            devices.find(|device| device.name().ok().as_deref() == Some(preferred_device_name))
+            devices.find(|device| device.description().ok().as_deref() == Some(preferred_device_name))
     {
         return Some(device);
     }
