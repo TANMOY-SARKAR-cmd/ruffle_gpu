@@ -9,7 +9,7 @@ use futures::Stream;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub struct FreedesktopSettings {
-    proxy: Settings<'static>,
+    proxy: Settings,
 }
 
 impl FreedesktopSettings {
@@ -24,7 +24,13 @@ impl FreedesktopSettings {
     }
 
     pub async fn watch_color_scheme(&self) -> Result<impl Stream<Item = ColorScheme> + use<>> {
-        Ok(self.proxy.receive_color_scheme_changed().await?)
+        use ashpd::desktop::settings::{COLOR_SCHEME_KEY, APPEARANCE_NAMESPACE};
+        use futures::StreamExt as _;
+        Ok(self
+            .proxy
+            .receive_setting_changed_with_args::<ColorScheme>(APPEARANCE_NAMESPACE, COLOR_SCHEME_KEY)
+            .await?
+            .filter_map(|t| futures::future::ready(t.ok())))
     }
 }
 
@@ -45,7 +51,7 @@ impl GameModeSession {
 }
 
 struct GameModeGuard {
-    gamemode: Option<ashpd::desktop::game_mode::GameMode<'static>>,
+    gamemode: Option<ashpd::desktop::game_mode::GameMode>,
 }
 
 impl GameModeGuard {
