@@ -96,7 +96,6 @@ impl Pipelines {
             &VERTEX_BUFFERS_DESCRIPTION_COLOR,
             &colort_bindings,
             BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            &[],
             PrimitiveTopology::TriangleList,
         );
 
@@ -109,7 +108,6 @@ impl Pipelines {
             &VERTEX_BUFFERS_DESCRIPTION_COLOR,
             &colort_bindings,
             BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            &[],
             PrimitiveTopology::LineStrip,
         );
 
@@ -128,7 +126,6 @@ impl Pipelines {
             &VERTEX_BUFFERS_DESCRIPTION_POS,
             &gradient_bindings,
             BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            &[],
             PrimitiveTopology::TriangleList,
         );
 
@@ -148,7 +145,6 @@ impl Pipelines {
                 &VERTEX_BUFFERS_DESCRIPTION_POS,
                 &complex_blend_bindings,
                 BlendState::REPLACE,
-                &[],
                 PrimitiveTopology::TriangleList,
             )
         };
@@ -172,7 +168,6 @@ impl Pipelines {
                     &VERTEX_BUFFERS_DESCRIPTION_POS,
                     &bitmap_blend_bindings,
                     blend.blend_state(),
-                    &[],
                     PrimitiveTopology::TriangleList,
                 )
             });
@@ -182,8 +177,12 @@ impl Pipelines {
         let bitmap_opaque_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: bitmap_opaque_pipeline_layout_label.as_deref(),
-                bind_group_layouts: &bitmap_blend_bindings,
-                push_constant_ranges: &[],
+                bind_group_layouts: &[
+                    Some(&bind_layouts.globals),
+                    Some(&bind_layouts.transforms),
+                    Some(&bind_layouts.bitmap),
+                ],
+                immediate_size: 0,
             });
 
         let bitmap_opaque = device.create_render_pipeline(&create_pipeline_descriptor(
@@ -210,8 +209,8 @@ impl Pipelines {
             &bitmap_opaque_pipeline_layout,
             Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Stencil8,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
+                depth_write_enabled: None,
+                depth_compare: None,
                 stencil: wgpu::StencilState {
                     front: wgpu::StencilFaceState::IGNORE,
                     back: wgpu::StencilFaceState::IGNORE,
@@ -246,7 +245,6 @@ impl Pipelines {
             &VERTEX_BUFFERS_DESCRIPTION_POS,
             &alpha_mask_bindings,
             BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            &[],
             PrimitiveTopology::TriangleList,
         );
 
@@ -309,12 +307,11 @@ fn create_pipeline_descriptor<'a>(
             mask: !0,
             alpha_to_coverage_enabled: false,
         },
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     }
 }
 
-#[expect(clippy::too_many_arguments)]
 fn create_shape_pipeline(
     name: &str,
     device: &wgpu::Device,
@@ -324,14 +321,15 @@ fn create_shape_pipeline(
     vertex_buffers_layout: &[wgpu::VertexBufferLayout<'_>],
     bind_group_layouts: &[&wgpu::BindGroupLayout],
     blend: BlendState,
-    push_constant_ranges: &[wgpu::PushConstantRange],
     primitive_topology: PrimitiveTopology,
 ) -> ShapePipeline {
+    let bind_group_layouts_opt: Vec<Option<&wgpu::BindGroupLayout>> =
+        bind_group_layouts.iter().map(|l| Some(*l)).collect();
     let pipeline_layout_label = create_debug_label!("{} shape pipeline layout", name);
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: pipeline_layout_label.as_deref(),
-        bind_group_layouts,
-        push_constant_ranges,
+        bind_group_layouts: &bind_group_layouts_opt,
+        immediate_size: 0,
     });
 
     let mask_render_state = |mask_name, stencil_state, write_mask| {
@@ -342,8 +340,8 @@ fn create_shape_pipeline(
             &pipeline_layout,
             Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Stencil8,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
+                depth_write_enabled: None,
+                depth_compare: None,
                 stencil: wgpu::StencilState {
                     front: stencil_state,
                     back: stencil_state,

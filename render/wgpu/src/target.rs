@@ -23,7 +23,7 @@ pub trait RenderTarget: Debug + 'static {
 
     fn height(&self) -> u32;
 
-    fn get_next_texture(&mut self) -> Result<Self::Frame, wgpu::SurfaceError>;
+    fn get_next_texture(&mut self) -> Result<Self::Frame, String>;
 
     fn submit<I: IntoIterator<Item = wgpu::CommandBuffer>>(
         &self,
@@ -121,10 +121,25 @@ impl RenderTarget for SwapChainTarget {
         self.surface_config.height
     }
 
-    fn get_next_texture(&mut self) -> Result<Self::Frame, wgpu::SurfaceError> {
-        let texture = self.window_surface.get_current_texture()?;
-        let view = texture.texture.create_view(&Default::default());
-        Ok(SwapChainTargetFrame { texture, view })
+    fn get_next_texture(&mut self) -> Result<Self::Frame, String> {
+        match self.window_surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
+                let view = texture.texture.create_view(&Default::default());
+                Ok(SwapChainTargetFrame { texture, view })
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                Err("Timeout acquiring surface texture".to_string())
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                Err("Surface texture is outdated".to_string())
+            }
+            wgpu::CurrentSurfaceTexture::Lost => Err("Surface texture is lost".to_string()),
+            wgpu::CurrentSurfaceTexture::Occluded => Err("Surface is occluded".to_string()),
+            wgpu::CurrentSurfaceTexture::Validation => {
+                Err("Validation error acquiring surface texture".to_string())
+            }
+        }
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -265,7 +280,7 @@ impl RenderTarget for TextureTarget {
         self.size.height
     }
 
-    fn get_next_texture(&mut self) -> Result<Self::Frame, wgpu::SurfaceError> {
+    fn get_next_texture(&mut self) -> Result<Self::Frame, String> {
         Ok(TextureTargetFrame(
             self.texture.create_view(&Default::default()),
         ))

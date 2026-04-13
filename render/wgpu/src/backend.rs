@@ -52,13 +52,14 @@ pub fn create_wgpu_instance(
     backends: wgpu::Backends,
     backend_options: wgpu::BackendOptions,
 ) -> wgpu::Instance {
-    wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends,
         flags: wgpu::InstanceFlags::default()
             .difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
             .with_env(),
         backend_options,
-        ..Default::default()
+        memory_budget_thresholds: Default::default(),
+        display: None,
     })
 }
 
@@ -1149,7 +1150,7 @@ async fn request_device(
     limits = limits.using_resolution(adapter.limits());
     limits = limits.using_alignment(adapter.limits());
     limits.max_uniform_buffer_binding_size = adapter.limits().max_uniform_buffer_binding_size;
-    limits.max_inter_stage_shader_components = adapter.limits().max_inter_stage_shader_components;
+    limits.max_inter_stage_shader_variables = adapter.limits().max_inter_stage_shader_variables;
     // This will be a default limit in a future wgpu version (down from 8).
     // It's required for some WebGL devices to be supported.
     limits.max_color_attachments = 4;
@@ -1221,7 +1222,7 @@ impl ActiveFrame {
             command_encoder: descriptors
                 .device
                 .create_command_encoder(&Default::default()),
-            staging_belt: wgpu::util::StagingBelt::new(65536),
+            staging_belt: wgpu::util::StagingBelt::new(descriptors.device.clone(), 65536),
             draws_since_flush: 0,
         }
     }

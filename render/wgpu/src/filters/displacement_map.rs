@@ -101,8 +101,8 @@ impl DisplacementMapFilter {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -158,7 +158,7 @@ impl DisplacementMapFilter {
                         targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
                         compilation_options: Default::default(),
                     }),
-                    multiview: None,
+                    multiview_mask: None,
                     cache: None,
                 })
         })
@@ -200,7 +200,6 @@ impl DisplacementMapFilter {
                 &self.uniform_buffer,
                 0,
                 self.uniform_size,
-                &descriptors.device,
             )
             .copy_from_slice(bytemuck::cast_slice(&[DisplacementMapUniform {
                 color: [
@@ -233,7 +232,6 @@ impl DisplacementMapFilter {
                 &self.vertex_buffer,
                 0,
                 self.vertices_size,
-                &descriptors.device,
             )
             .copy_from_slice(bytemuck::cast_slice(&[source.vertices()]));
         let filter_group = descriptors

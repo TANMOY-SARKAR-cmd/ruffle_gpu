@@ -85,11 +85,11 @@ impl Descriptors {
                         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                             label: create_debug_label!("Copy sRGB pipeline layout").as_deref(),
                             bind_group_layouts: &[
-                                &self.bind_layouts.globals,
-                                &self.bind_layouts.transforms,
-                                &self.bind_layouts.bitmap,
+                                Some(&self.bind_layouts.globals),
+                                Some(&self.bind_layouts.transforms),
+                                Some(&self.bind_layouts.bitmap),
                             ],
-                            push_constant_ranges: &[],
+                            immediate_size: 0,
                         });
                 self.device
                     .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -128,7 +128,7 @@ impl Descriptors {
                             mask: !0,
                             alpha_to_coverage_enabled: false,
                         },
-                        multiview: None,
+                        multiview_mask: None,
                         cache: None,
                     })
             })
@@ -153,11 +153,11 @@ impl Descriptors {
                         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                             label: create_debug_label!("Copy pipeline layout").as_deref(),
                             bind_group_layouts: &[
-                                &self.bind_layouts.globals,
-                                &self.bind_layouts.transforms,
-                                &self.bind_layouts.bitmap,
+                                Some(&self.bind_layouts.globals),
+                                Some(&self.bind_layouts.transforms),
+                                Some(&self.bind_layouts.bitmap),
                             ],
-                            push_constant_ranges: &[],
+                            immediate_size: 0,
                         });
                 self.device
                     .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -196,7 +196,7 @@ impl Descriptors {
                             mask: !0,
                             alpha_to_coverage_enabled: false,
                         },
-                        multiview: None,
+                        multiview_mask: None,
                         cache: None,
                     })
             })
