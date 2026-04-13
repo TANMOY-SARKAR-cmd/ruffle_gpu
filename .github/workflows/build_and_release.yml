@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-    branches:
-      - 'copilot/fix-mismatched-types-errors'
 
   # Allow for manual dispatch on GitHub
   workflow_dispatch:
