@@ -1,6 +1,7 @@
 use super::{Object, string::AvmString};
 use fnv::FnvBuildHasher;
 use gc_arena::Collect;
+use gc_arena::collect::Trace;
 use hashbrown::HashTable;
 use hashbrown::hash_table::Entry;
 use std::cell::Cell;
@@ -29,18 +30,23 @@ pub enum DynamicKey<'gc> {
 ///
 /// Uses `HashTable` directly to expose stable bucket indices, which are
 /// needed for correct iteration when entries are added or removed mid-iteration.
-#[derive(Debug, Clone, Collect)]
-#[collect(no_drop)]
+#[derive(Debug, Clone)]
 pub struct DynamicMap<K, V> {
     table: HashTable<(K, DynamicProperty<V>)>,
-    #[collect(require_static)]
     hasher: FnvBuildHasher,
     // The last index that was given back to flash
-    #[collect(require_static)]
     public_index: Cell<usize>,
     // The actual bucket index that represents where an item is in the table
-    #[collect(require_static)]
     real_index: Cell<usize>,
+}
+
+unsafe impl<'gc, K: Collect<'gc>, V: Collect<'gc>> Collect<'gc> for DynamicMap<K, V> {
+    fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
+        for (k, v) in self.table.iter() {
+            cc.trace(k);
+            cc.trace(v);
+        }
+    }
 }
 
 impl<K: Eq + Hash, V> Default for DynamicMap<K, V> {
