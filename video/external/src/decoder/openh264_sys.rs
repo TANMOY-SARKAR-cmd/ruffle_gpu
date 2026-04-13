@@ -1363,7 +1363,7 @@ pub struct OpenH264 {
 impl OpenH264 {
     pub unsafe fn new<P>(filename: P) -> Result<Self, ::libloading::Error>
     where
-        P: AsRef<::std::ffi::OsStr>,
+        P: ::libloading::AsFilename,
     {
         let library = ::libloading::Library::new(filename)?;
         Self::from_library(library)
