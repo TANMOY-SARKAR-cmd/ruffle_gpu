@@ -4,44 +4,42 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'Cargo.toml'
 
 permissions:
   contents: write
 
 jobs:
   autotag:
-    name: Create Tag on Version Change
+    name: Increment and Create Tag on Push
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
-      - name: Get current version
-        id: current_version
+      - name: Get latest tag and compute next tag
+        id: next_tag
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          git fetch --tags
+          LATEST=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          if [ -z "$LATEST" ]; then
+            NEXT="v0.0.1"
+          else
+            MAJOR=$(echo "$LATEST" | sed 's/^v//' | cut -d. -f1)
+            MINOR=$(echo "$LATEST" | sed 's/^v//' | cut -d. -f2)
+            PATCH=$(echo "$LATEST" | sed 's/^v//' | cut -d. -f3)
+            NEXT="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+          echo "tag=$NEXT" >> $GITHUB_OUTPUT
+          echo "Next tag: $NEXT"
 
-      - name: Get previous version
-        id: previous_version
-        run: |
-          git checkout HEAD~1 -- Cargo.toml 2>/dev/null || echo "No previous Cargo.toml"
-          PREV_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/' 2>/dev/null || echo "")
-          echo "version=$PREV_VERSION" >> $GITHUB_OUTPUT
-          git checkout HEAD -- Cargo.toml
-
-      - name: Create tag if version changed
-        if: steps.current_version.outputs.version != steps.previous_version.outputs.version && steps.current_version.outputs.version != ''
+      - name: Create and push new tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="v${{ steps.current_version.outputs.version }}"
-          echo "Creating tag $VERSION"
+          TAG="${{ steps.next_tag.outputs.tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$VERSION"
-          git push origin "$VERSION"
+          git tag "$TAG"
+          git push origin "$TAG"
