@@ -219,7 +219,7 @@ impl OpenH264Codec {
         let openh264_data = Self::get_data()?;
 
         for filename in openh264_data.local_filenames {
-            match OpenH264Codec::load_existing(filename) {
+            match OpenH264Codec::load_existing(*filename) {
                 Ok(codec) => return Ok(codec),
                 Err(err) => {
                     tracing::warn!(
