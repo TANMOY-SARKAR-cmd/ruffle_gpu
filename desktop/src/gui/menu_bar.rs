@@ -97,7 +97,7 @@ impl MenuBar {
         dialogs: &mut Dialogs,
         mut player: Option<&mut Player>,
     ) {
-        egui::TopBottomPanel::top("menu_bar").show(egui_ctx, |ui| {
+        egui::Panel::top("menu_bar").show(egui_ctx, |ui| {
              egui::MenuBar::new().ui(ui, |ui| {
                 self.file_menu(locale, ui, dialogs, player.is_some());
                 self.view_menu(locale, ui, &mut player);

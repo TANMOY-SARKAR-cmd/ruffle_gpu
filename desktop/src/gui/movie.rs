@@ -232,7 +232,7 @@ impl RenderTarget for MovieView {
         self.texture.height()
     }
 
-    fn get_next_texture(&mut self) -> Result<Self::Frame, wgpu::SurfaceError> {
+    fn get_next_texture(&mut self) -> Result<Self::Frame, String> {
         Ok(MovieViewFrame(
             self.texture.create_view(&Default::default()),
         ))
