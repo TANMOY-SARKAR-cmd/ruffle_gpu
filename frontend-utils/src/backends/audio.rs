@@ -115,7 +115,12 @@ fn get_suitable_output_device(
     if let Some(preferred_device_name) = preferred_device_name
         && let Ok(mut devices) = host.output_devices()
         && let Some(device) =
-            devices.find(|device| device.description().ok().as_deref() == Some(preferred_device_name))
+            devices.find(|device| {
+                device
+                    .description()
+                    .map(|d| d.name() == preferred_device_name)
+                    .unwrap_or(false)
+            })
     {
         return Some(device);
     }
