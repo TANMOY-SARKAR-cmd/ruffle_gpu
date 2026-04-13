@@ -197,7 +197,7 @@ impl OpenH264Codec {
     /// Loads an existing OpenH264 library from the given path.
     fn load_existing<P>(filename: P) -> Result<Self, OpenH264Error>
     where
-        P: AsRef<::std::ffi::OsStr>,
+        P: ::libloading::AsFilename,
     {
         let openh264 = unsafe { OpenH264::new(filename)? };
 
