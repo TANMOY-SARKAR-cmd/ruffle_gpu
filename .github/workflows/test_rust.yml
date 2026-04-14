@@ -294,7 +294,7 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@175dc7fd4fb85ec8f46948fb98f44db001149081 # v2
 
       - name: Check unused dependencies
-        uses: bnjbvr/cargo-machete@db87f5ee388b462ee8c4311742246d599b78a00a # main
+        uses: bnjbvr/cargo-machete@e82b6af0d3610e62ddf49bf7c62e662d7e31db0d # main
         # So the previous step failing doesn't prevent this one from running.
         if: always()
 
