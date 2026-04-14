@@ -86,11 +86,7 @@ impl From<&GlobalPreferences> for LaunchOptions {
                 player_version: value.cli.player_version,
                 player_runtime: value.cli.player_runtime,
                 frame_rate: value.cli.frame_rate,
-                dummy_external_interface: if value.cli.dummy_external_interface {
-                    Some(true)
-                } else {
-                    None
-                },
+                dummy_external_interface: value.cli.dummy_external_interface,
             },
             proxy: value.cli.proxy.clone(),
             fullscreen: value.cli.fullscreen,
