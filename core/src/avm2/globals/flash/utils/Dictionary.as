@@ -6,9 +6,11 @@ package flash.utils {
         };
         prototype.setPropertyIsEnumerable("toJSON", false);
 
+        private native function initWeakKeys():void;
+
         public function Dictionary(weakKeys:Boolean = false) {
             if (weakKeys) {
-                __ruffle__.stub_constructor("flash.utils.Dictionary", "weakKeys");
+                this.initWeakKeys();
             }
         }
     }
