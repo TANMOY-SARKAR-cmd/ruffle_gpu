@@ -200,10 +200,14 @@ pub struct Opt {
     pub filesystem_access_mode: FilesystemAccessMode,
 
     /// Provide a dummy (completely empty) External Interface to the movie.
-    /// This may break some movies that expect an External Interface to be functional,
-    /// but may fix others that always require an External Interface.
-    #[clap(long)]
-    pub dummy_external_interface: bool,
+    /// Runtime behavior enables this by default to prevent games from throwing
+    /// errors when calling ExternalInterface methods (e.g. analytics), which
+    /// could otherwise silently abort button handlers before they can navigate
+    /// to the next frame. Use `--dummy-external-interface` to force-enable it,
+    /// `--dummy-external-interface=false` to disable it, or omit the option to
+    /// use the runtime default.
+    #[clap(long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
+    pub dummy_external_interface: Option<bool>,
 
     /// Hides the menu bar (the bar at the top of the window).
     #[clap(long)]
