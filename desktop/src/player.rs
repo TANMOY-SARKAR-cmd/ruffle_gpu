@@ -278,7 +278,8 @@ impl ActivePlayer {
         // ExternalInterface.call() for analytics or tracking don't throw AVM2
         // Error 2067, which would silently abort button handlers (e.g. play buttons)
         // before they can execute gotoAndPlay or other navigation.
-        // The flag can still be set to `false` via CLI to disable this behaviour.
+        // This remains enabled unless some configuration source explicitly sets
+        // `dummy_external_interface` to `false`.
         if opt.player.dummy_external_interface.unwrap_or(true) {
             builder = builder.with_external_interface(Box::new(DesktopExternalInterfaceProvider {
                 spoof_url: opt.player.spoof_url.clone(),
