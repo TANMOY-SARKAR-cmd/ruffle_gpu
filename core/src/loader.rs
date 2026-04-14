@@ -1268,11 +1268,19 @@ pub fn load_data_into_url_loader<'gc>(
                     Avm2::dispatch_event(uc, complete_evt, target);
                 }
                 Err(response) => {
-                    tracing::error!(
-                        "Error during URLLoader load of {:?}: {:?}",
-                        response.url,
-                        response.error
-                    );
+                    if matches!(response.error, Error::InvalidDomain(_)) {
+                        tracing::warn!(
+                            "Error during URLLoader load of {:?}: {:?}",
+                            response.url,
+                            response.error
+                        );
+                    } else {
+                        tracing::error!(
+                            "Error during URLLoader load of {:?}: {:?}",
+                            response.url,
+                            response.error
+                        );
+                    }
 
                     // Testing with Flash shoes that the 'data' property is cleared
                     // when an error occurs

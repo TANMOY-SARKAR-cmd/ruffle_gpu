@@ -676,7 +676,7 @@ fn register_family_font(
     let (name, fontdata) = match load_system_font(font_database, query) {
         Ok((name, fontdata)) => (name, fontdata),
         Err(e) => {
-            tracing::warn!("Failed to register {query:?} as {family}: {e}");
+            tracing::debug!("Failed to register {query:?} as {family}: {e}");
             return;
         }
     };
