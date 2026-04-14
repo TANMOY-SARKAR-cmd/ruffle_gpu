@@ -12,17 +12,11 @@ updates:
         update-types:
           - "minor"
           - "patch"
-    labels:
-      - "T-chore"
-      - "A-deps"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    labels:
-      - "T-chore"
-      - "A-deps"
 
   - package-ecosystem: "cargo"
     directory: "/"
@@ -48,6 +42,3 @@ updates:
         update-types:
           - "minor"
           - "patch"
-    labels:
-      - "T-chore"
-      - "A-deps"
