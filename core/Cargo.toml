@@ -68,7 +68,7 @@ num-bigint = "0.4"
 unicode-segmentation = "1.13.2"
 id3 = "1.16.4"
 either = "1.15.0"
-chardetng = "0.1.17"
+chardetng = "1.0.0"
 tracy-client = { version = "0.18.4", optional = true, default-features = false }
 itertools = "0.14.0"
 
