@@ -274,7 +274,12 @@ impl ActivePlayer {
             .expect("Couldn't create wgpu rendering backend");
         RENDER_INFO.with(|i| *i.borrow_mut() = Some(renderer.debug_info().to_string()));
 
-        if opt.player.dummy_external_interface.unwrap_or_default() {
+        // Enable the dummy ExternalInterface by default so that games calling
+        // ExternalInterface.call() for analytics or tracking don't throw AVM2
+        // Error 2067, which would silently abort button handlers (e.g. play buttons)
+        // before they can execute gotoAndPlay or other navigation.
+        // The flag can still be set to `false` via CLI to disable this behaviour.
+        if opt.player.dummy_external_interface.unwrap_or(true) {
             builder = builder.with_external_interface(Box::new(DesktopExternalInterfaceProvider {
                 spoof_url: opt.player.spoof_url.clone(),
             }));
