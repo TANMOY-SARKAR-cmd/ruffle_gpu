@@ -291,7 +291,7 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Check licenses, duplicates, and advisories
-        uses: EmbarkStudios/cargo-deny-action@175dc7fd4fb85ec8f46948fb98f44db001149081 # v2
+        uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb # v2
 
       - name: Check unused dependencies
         uses: bnjbvr/cargo-machete@e82b6af0d3610e62ddf49bf7c62e662d7e31db0d # main
