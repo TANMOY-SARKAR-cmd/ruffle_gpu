@@ -100,7 +100,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install cargo nextest
-        uses: taiki-e/install-action@0abfcd587b70a713fdaa7fb502c885e2112acb15 # v2
+        uses: taiki-e/install-action@0c7a94999971db56e9df89df226240aab222e776 # v2
         with:
           tool: cargo-nextest
 
@@ -216,7 +216,7 @@ jobs:
           components: llvm-tools
 
       - name: Install llvm-cov
-        uses: taiki-e/install-action@0abfcd587b70a713fdaa7fb502c885e2112acb15 # v2
+        uses: taiki-e/install-action@0c7a94999971db56e9df89df226240aab222e776 # v2
         with:
           tool: cargo-llvm-cov
 
