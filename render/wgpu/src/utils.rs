@@ -284,6 +284,7 @@ pub fn run_copy_pipeline(
 /// Only the final display copy is routed through this function.  Intermediate
 /// copies (e.g. bitmap-cache entries) continue to use `run_copy_pipeline` so
 /// that game-logic textures are never affected.
+#[cfg(feature = "gpu_post_process")]
 #[expect(clippy::too_many_arguments)]
 pub fn run_post_process_pipeline(
     descriptors: &Descriptors,

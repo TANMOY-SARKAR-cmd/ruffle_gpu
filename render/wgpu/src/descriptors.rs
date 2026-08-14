@@ -24,8 +24,10 @@ pub struct Descriptors {
     copy_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
     copy_srgb_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
     /// Pipeline cache for the final post-process pass (formats match).
+    #[cfg(feature = "gpu_post_process")]
     post_process_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
     /// Pipeline cache for the final post-process pass (sRGB surface variant).
+    #[cfg(feature = "gpu_post_process")]
     post_process_srgb_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
     pub shaders: Shaders,
     pipelines: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), Arc<Pipelines>>>,
@@ -65,7 +67,9 @@ impl Descriptors {
             quad,
             copy_pipeline: Default::default(),
             copy_srgb_pipeline: Default::default(),
+            #[cfg(feature = "gpu_post_process")]
             post_process_pipeline: Default::default(),
+            #[cfg(feature = "gpu_post_process")]
             post_process_srgb_pipeline: Default::default(),
             shaders,
             pipelines: Default::default(),
@@ -213,6 +217,7 @@ impl Descriptors {
     /// This pipeline replaces the plain copy for the scene → swapchain step,
     /// adding bilinear filtering, FXAA, sharpening, and colour correction.
     /// Used when the internal format equals the surface format.
+    #[cfg(feature = "gpu_post_process")]
     pub fn post_process_pipeline(
         &self,
         format: wgpu::TextureFormat,
@@ -281,6 +286,7 @@ impl Descriptors {
     /// Returns the post-process pipeline for the given sRGB surface format.
     /// Identical to `post_process_pipeline` but additionally applies the
     /// sRGB colour-space conversion before writing to the sRGB swapchain.
+    #[cfg(feature = "gpu_post_process")]
     pub fn post_process_srgb_pipeline(
         &self,
         format: wgpu::TextureFormat,

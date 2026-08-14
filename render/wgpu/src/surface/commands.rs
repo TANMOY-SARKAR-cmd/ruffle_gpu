@@ -7,7 +7,9 @@ use crate::dynamic_transforms::DynamicTransforms;
 use crate::mesh::{DrawType, Mesh, as_mesh};
 use crate::surface::Surface;
 use crate::surface::target::CommandTarget;
-use crate::{Descriptors, MaskState, Pipelines, BitmapInstance, RectInstance, Transforms, as_texture};
+use crate::{
+    BitmapInstance, Descriptors, MaskState, Pipelines, RectInstance, Transforms, as_texture,
+};
 use ruffle_render::backend::ShapeHandle;
 use ruffle_render::bitmap::{BitmapHandle, PixelSnapping};
 use ruffle_render::commands::{CommandHandler, CommandList, RenderBlendMode};
@@ -206,7 +208,13 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
                 num_instances,
                 smoothing,
                 blend_mode,
-            } => self.draw_bitmap_instanced(bitmap, instances, *num_instances, *smoothing, *blend_mode),
+            } => self.draw_bitmap_instanced(
+                bitmap,
+                instances,
+                *num_instances,
+                *smoothing,
+                *blend_mode,
+            ),
             DrawCommand::RenderTexture {
                 _texture,
                 binds,
@@ -229,7 +237,9 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
                 num_instances,
             } => self.draw_rect_instanced(instances, *num_instances),
             DrawCommand::PendingRectBatch(_) | DrawCommand::PendingBitmapBatch { .. } => {
-                unreachable!("pending batch commands must be consumed by optimize_draw_commands before rendering")
+                unreachable!(
+                    "pending batch commands must be consumed by optimize_draw_commands before rendering"
+                )
             }
             DrawCommand::PushMask => self.push_mask(),
             DrawCommand::ActivateMask => self.activate_mask(),
@@ -474,9 +484,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
     /// and therefore needs only the global bind group (group 0).
     pub fn prep_rect_instanced(&mut self) {
         if self.needs_stencil {
-            self.set_pipeline_cached(
-                self.pipelines.rect_instanced.pipeline_for(self.mask_state),
-            );
+            self.set_pipeline_cached(self.pipelines.rect_instanced.pipeline_for(self.mask_state));
         } else {
             self.set_pipeline_cached(self.pipelines.rect_instanced.stencilless_pipeline());
         }
@@ -488,11 +496,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
     /// premultiplied colour).  The shared unit-quad geometry is read from
     /// `descriptors.quad.vertices_pos` and `descriptors.quad.indices`.
     /// A single `draw_indexed` call renders all instances at once.
-    pub fn draw_rect_instanced(
-        &mut self,
-        instances: &'pass wgpu::Buffer,
-        num_instances: u32,
-    ) {
+    pub fn draw_rect_instanced(&mut self, instances: &'pass wgpu::Buffer, num_instances: u32) {
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.push_debug_group("draw_rect_instanced");
         }
@@ -842,9 +846,7 @@ fn optimize_draw_commands(
 
                 // If adding new_rects would exceed the limit, flush the
                 // current rect run first.
-                if !rect_run.is_empty()
-                    && rect_run.len() + new_rects.len() > rect_batch_limit
-                {
+                if !rect_run.is_empty() && rect_run.len() + new_rects.len() > rect_batch_limit {
                     emit_rect_run(&mut rect_run, &mut out, device);
                 }
                 rect_run.append(&mut new_rects);
@@ -864,10 +866,8 @@ fn optimize_draw_commands(
                 // Different type: flush any in-progress rect run.
                 emit_rect_run(&mut rect_run, &mut out, device);
 
-                let same_key = bitmap_run.as_ref().map_or(false, |(pb, ps, pbl, _)| {
-                    *pb == bitmap
-                        && *ps == smoothing
-                        && *pbl == blend_mode
+                let same_key = bitmap_run.as_ref().is_some_and(|(pb, ps, pbl, _)| {
+                    *pb == bitmap && *ps == smoothing && *pbl == blend_mode
                 });
 
                 if !same_key {
@@ -1108,7 +1108,8 @@ impl<'a> WgpuCommandHandler<'a> {
                 self.rect_batch_limit,
                 self.bitmap_batch_limit,
             );
-            self.result.push(Chunk::Draw(cmds, needs_stencil, transforms));
+            self.result
+                .push(Chunk::Draw(cmds, needs_stencil, transforms));
         }
 
         mem::take(&mut self.result)
@@ -1320,23 +1321,20 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         // `BitmapHandle::PartialEq` uses `Arc::ptr_eq`, so equality holds between
         // any two handles that were cloned from the same original — i.e. they
         // share the same underlying GPU texture allocation.
-        if let Some((ref key_bitmap, key_smoothing, key_blend)) = self.bitmap_batch_key {
-            if *key_bitmap != bitmap
-                || key_smoothing != smoothing
-                || key_blend != blend_mode
-            {
-                self.flush_bitmap_batch();
-            }
+        if let Some((ref key_bitmap, key_smoothing, key_blend)) = self.bitmap_batch_key
+            && (*key_bitmap != bitmap || key_smoothing != smoothing || key_blend != blend_mode)
+        {
+            self.flush_bitmap_batch();
         }
         self.bitmap_batch_key = Some((bitmap, smoothing, blend_mode));
         self.bitmap_instances.push(BitmapInstance {
-            x_axis:      [matrix.a, matrix.b],
-            y_axis:      [matrix.c, matrix.d],
+            x_axis: [matrix.a, matrix.b],
+            y_axis: [matrix.c, matrix.d],
             translation: [matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32],
-            mult_color:  transform.color_transform.mult_rgba_normalized(),
-            add_color:   transform.color_transform.add_rgba_normalized(),
+            mult_color: transform.color_transform.mult_rgba_normalized(),
+            add_color: transform.color_transform.add_rgba_normalized(),
             // Full texture: UV maps [0,1]×[0,1] to [0,0]–[1,1].
-            uv_rect:     [0.0, 0.0, 1.0, 1.0],
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
         });
 
         // Flush when the batch reaches the size limit.
@@ -1389,8 +1387,8 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         // positions on the CPU.  The vertex shader applies the affine transform
         // to the shared unit-quad geometry for each instance.
         self.rect_instances.push(RectInstance {
-            x_axis:      [matrix.a, matrix.b],
-            y_axis:      [matrix.c, matrix.d],
+            x_axis: [matrix.a, matrix.b],
+            y_axis: [matrix.c, matrix.d],
             translation: [matrix.tx.to_pixels() as f32, matrix.ty.to_pixels() as f32],
             color: color_to_premult_rgba(color),
         });

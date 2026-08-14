@@ -139,8 +139,7 @@ impl FrameMetrics {
 
         if self.initialized {
             // Update EMA — unchanged from before.
-            self.smoothed_ms =
-                EMA_ALPHA * elapsed_ms + (1.0 - EMA_ALPHA) * self.smoothed_ms;
+            self.smoothed_ms = EMA_ALPHA * elapsed_ms + (1.0 - EMA_ALPHA) * self.smoothed_ms;
 
             // Warm-up gate: skip all adjustments until the EMA has been running
             // for WARMUP_FRAMES.  The first few frames often carry start-up
@@ -153,32 +152,31 @@ impl FrameMetrics {
             // when smoothed_ms hovers near a threshold, eliminating oscillation.
             // `last_adjust_frame = None` means no adjustment has ever been made,
             // so the first post-warmup pressure signal is acted on immediately.
-            let cooldown_elapsed = self.last_adjust_frame.map_or(true, |last| {
-                self.frame_index.saturating_sub(last) >= COOLDOWN_FRAMES
-            });
+            let cooldown_elapsed = self
+                .last_adjust_frame
+                .is_none_or(|last| self.frame_index.saturating_sub(last) >= COOLDOWN_FRAMES);
             if warmed_up && cooldown_elapsed {
                 // Each per-type limit is computed independently from its own
                 // current value, sharing only the EMA signal and cooldown
                 // window.  The helper encapsulates the lerp formula so the
                 // logic is not duplicated.
                 let new_rect = Self::compute_new_limit(self.rect_batch_limit, self.smoothed_ms);
-                let new_bitmap =
-                    Self::compute_new_limit(self.bitmap_batch_limit, self.smoothed_ms);
+                let new_bitmap = Self::compute_new_limit(self.bitmap_batch_limit, self.smoothed_ms);
 
                 // Apply and track whether either limit actually changed so the
                 // cooldown window is only anchored to real adjustments.
                 let mut adjusted = false;
-                if let Some(limit) = new_rect {
-                    if limit != self.rect_batch_limit {
-                        self.rect_batch_limit = limit;
-                        adjusted = true;
-                    }
+                if let Some(limit) = new_rect
+                    && limit != self.rect_batch_limit
+                {
+                    self.rect_batch_limit = limit;
+                    adjusted = true;
                 }
-                if let Some(limit) = new_bitmap {
-                    if limit != self.bitmap_batch_limit {
-                        self.bitmap_batch_limit = limit;
-                        adjusted = true;
-                    }
+                if let Some(limit) = new_bitmap
+                    && limit != self.bitmap_batch_limit
+                {
+                    self.bitmap_batch_limit = limit;
+                    adjusted = true;
                 }
                 if adjusted {
                     // Record the frame on which the change was made so the
@@ -219,8 +217,7 @@ impl FrameMetrics {
             // the limit can reach MAX_BATCH_LIMIT exactly when the
             // remaining gap shrinks below 1.0, avoiding an infinite
             // near-ceiling stall.
-            let new =
-                current as f64 * (1.0 - LERP_STEP_UP) + MAX_BATCH_LIMIT as f64 * LERP_STEP_UP;
+            let new = current as f64 * (1.0 - LERP_STEP_UP) + MAX_BATCH_LIMIT as f64 * LERP_STEP_UP;
             Some((new.ceil() as usize).min(MAX_BATCH_LIMIT))
         } else {
             None

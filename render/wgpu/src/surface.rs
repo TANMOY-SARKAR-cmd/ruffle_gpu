@@ -9,7 +9,9 @@ use crate::filters::FilterSource;
 use crate::mesh::Mesh;
 use crate::pixel_bender::{ShaderMode, run_pixelbender_shader_impl};
 use crate::surface::commands::{Chunk, CommandRenderer, chunk_blends};
-use crate::utils::{remove_srgb, supported_sample_count};
+use crate::utils::{remove_srgb, run_copy_pipeline, supported_sample_count};
+#[cfg(feature = "gpu_post_process")]
+use crate::utils::run_post_process_pipeline;
 use crate::{Descriptors, MaskState, Pipelines};
 use ruffle_render::commands::CommandList;
 use ruffle_render::pixel_bender_support::{ImageInputTexture, PixelBenderShaderArgument};
@@ -17,9 +19,6 @@ use ruffle_render::quality::StageQuality;
 use std::sync::Arc;
 use target::CommandTarget;
 use tracing::instrument;
-
-use crate::utils::run_post_process_pipeline;
-
 pub use crate::surface::commands::LayerRef;
 
 use self::commands::ChunkBlendMode;
@@ -96,7 +95,29 @@ impl Surface {
             bitmap_batch_limit,
         );
 
-        run_post_process_pipeline(
+        #[cfg(feature = "gpu_post_process")]
+        {
+            // Note: the post-process pass alters every displayed pixel (FXAA,
+            // sharpening, colour correction). Respect the Stage quality
+            // setting: at `Low` quality Flash disables all anti-aliasing,
+            // so skip post-processing there as well.
+            if self.quality != StageQuality::Low {
+                run_post_process_pipeline(
+                    descriptors,
+                    self.format,
+                    self.actual_surface_format,
+                    frame_view,
+                    target.color_view(),
+                    target.whole_frame_bind_group(descriptors),
+                    target.globals(),
+                    1,
+                    draw_encoder,
+                );
+                return;
+            }
+        }
+
+        run_copy_pipeline(
             descriptors,
             self.format,
             self.actual_surface_format,
