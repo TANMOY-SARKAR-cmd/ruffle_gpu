@@ -1500,3 +1500,123 @@ impl ActiveFrame {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn warmup_suppresses_early_adjustments() {
+        // No adjustment should happen during the warm-up window, even under
+        // sustained pressure (34 ms > PRESSURE_THRESHOLD_MS).
+        let mut metrics = FrameMetrics::new();
+        let start = Instant::now() - Duration::from_millis(100);
+        for _ in 0..WARMUP_FRAMES {
+            metrics.end_frame(start);
+        }
+        assert_eq!(metrics.rect_batch_limit(), MAX_BATCH_LIMIT);
+        assert_eq!(metrics.bitmap_batch_limit(), MAX_BATCH_LIMIT);
+    }
+
+    #[test]
+    fn pressure_reduces_limits_toward_minimum() {
+        // Sustained heavy frames (60 ms) should drive both limits down,
+        // never below MIN_BATCH_LIMIT.
+        let mut metrics = FrameMetrics::new();
+        let start = Instant::now() - Duration::from_millis(100);
+        // Run warm-up frames at a healthy pace first.
+        for _ in 0..WARMUP_FRAMES {
+            metrics.end_frame(start);
+        }
+        // Now emit pressure frames: each cooldown window may reduce the
+        // limits by up to 25% of the remaining gap per adjustment.
+        for _ in 0..40 {
+            metrics.end_frame(Instant::now() - Duration::from_millis(60));
+        }
+        assert!(metrics.rect_batch_limit() < MAX_BATCH_LIMIT);
+        assert!(metrics.bitmap_batch_limit() < MAX_BATCH_LIMIT);
+        assert!(metrics.rect_batch_limit() >= MIN_BATCH_LIMIT);
+        assert!(metrics.bitmap_batch_limit() >= MIN_BATCH_LIMIT);
+    }
+
+    #[test]
+    fn limits_floor_at_minimum_and_never_undershoot() {
+        // After enough pressure the controller must settle exactly at
+        // MIN_BATCH_LIMIT and never dip below it.
+        let mut metrics = FrameMetrics::new();
+        let start = Instant::now() - Duration::from_millis(100);
+        for _ in 0..WARMUP_FRAMES {
+            metrics.end_frame(start);
+        }
+        for _ in 0..600 {
+            metrics.end_frame(Instant::now() - Duration::from_millis(60));
+        }
+        assert_eq!(metrics.rect_batch_limit(), MIN_BATCH_LIMIT);
+        assert_eq!(metrics.bitmap_batch_limit(), MIN_BATCH_LIMIT);
+    }
+
+    #[test]
+    fn fast_frames_recover_limits_toward_maximum() {
+        // After a pressure event, fast frames (10 ms < RELIEF_THRESHOLD_MS)
+        // should recover the limits toward MAX_BATCH_LIMIT, capped there.
+        let mut metrics = FrameMetrics::new();
+        let start = Instant::now() - Duration::from_millis(100);
+        for _ in 0..WARMUP_FRAMES {
+            metrics.end_frame(start);
+        }
+        // Pressure first.
+        for _ in 0..40 {
+            metrics.end_frame(Instant::now() - Duration::from_millis(60));
+        }
+        let reduced_rect = metrics.rect_batch_limit();
+        let reduced_bitmap = metrics.bitmap_batch_limit();
+        assert!(reduced_rect < MAX_BATCH_LIMIT);
+        // Then relief.
+        for _ in 0..100 {
+            metrics.end_frame(Instant::now() - Duration::from_millis(10));
+        }
+        assert!(metrics.rect_batch_limit() > reduced_rect);
+        assert!(metrics.bitmap_batch_limit() > reduced_bitmap);
+        assert!(metrics.rect_batch_limit() <= MAX_BATCH_LIMIT);
+        assert!(metrics.bitmap_batch_limit() <= MAX_BATCH_LIMIT);
+    }
+
+    #[test]
+    fn sustained_sub_pressure_frames_stabilize_the_limits() {
+        // At a steady 24 ms frame time the EMA converges to 24 ms, which sits
+        // in the controller's comfort band (RELIEF < 24 < PRESSURE), so after
+        // the EMA settles no further adjustments must occur and the limits
+        // must stay within bounds.
+        let mut metrics = FrameMetrics::new();
+        let start = Instant::now() - Duration::from_millis(100);
+        for _ in 0..WARMUP_FRAMES {
+            metrics.end_frame(start);
+        }
+        // Force reductions first.
+        for _ in 0..40 {
+            metrics.end_frame(Instant::now() - Duration::from_millis(60));
+        }
+        // Run long enough for the EMA (alpha 0.1) to converge from ~60 ms to
+        // ~24 ms (settling time ~ 10/(alpha) frames is conservative).
+        for _ in 0..600 {
+            metrics.end_frame(Instant::now() - Duration::from_millis(24));
+        }
+        let rect = metrics.rect_batch_limit();
+        let bitmap = metrics.bitmap_batch_limit();
+        assert!(
+            (MIN_BATCH_LIMIT..=MAX_BATCH_LIMIT).contains(&rect),
+            "rect limit out of bounds: {rect}"
+        );
+        assert!(
+            (MIN_BATCH_LIMIT..=MAX_BATCH_LIMIT).contains(&bitmap),
+            "bitmap limit out of bounds: {bitmap}"
+        );
+        // After convergence, 200 more frames must not move the limits further.
+        for _ in 0..200 {
+            metrics.end_frame(Instant::now() - Duration::from_millis(24));
+        }
+        assert_eq!(metrics.rect_batch_limit(), rect);
+        assert_eq!(metrics.bitmap_batch_limit(), bitmap);
+    }
+}

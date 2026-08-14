@@ -195,10 +195,7 @@ impl OpenH264Codec {
     }
 
     /// Loads an existing OpenH264 library from the given path.
-    fn load_existing<P>(filename: P) -> Result<Self, OpenH264Error>
-    where
-        P: AsRef<::std::ffi::OsStr>,
-    {
+    fn load_existing(filename: &std::ffi::OsStr) -> Result<Self, OpenH264Error> {
         let openh264 = unsafe { OpenH264::new(filename)? };
 
         let version = unsafe { openh264.WelsGetCodecVersion() };
@@ -219,7 +216,7 @@ impl OpenH264Codec {
         let openh264_data = Self::get_data()?;
 
         for filename in openh264_data.local_filenames {
-            match OpenH264Codec::load_existing(filename) {
+            match OpenH264Codec::load_existing(std::ffi::OsStr::new(filename)) {
                 Ok(codec) => return Ok(codec),
                 Err(err) => {
                     tracing::warn!(
@@ -233,7 +230,7 @@ impl OpenH264Codec {
 
         let filename = Self::fetch_and_verify(&openh264_data, directory)?;
         tracing::info!("Using OpenH264 at {:?}", filename);
-        Ok(OpenH264Codec::load_existing(&filename)?)
+        Ok(OpenH264Codec::load_existing(filename.as_os_str())?)
     }
 }
 
