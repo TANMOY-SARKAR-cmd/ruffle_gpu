@@ -82,7 +82,6 @@ impl BufferBuilder {
     pub fn copy_to(
         self,
         staging_belt: &mut wgpu::util::StagingBelt,
-        device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         buffer: &wgpu::Buffer,
     ) {
@@ -92,7 +91,6 @@ impl BufferBuilder {
                 buffer,
                 BufferAddress::default(),
                 length,
-                device,
             );
             view.copy_from_slice(&self.inner);
         }

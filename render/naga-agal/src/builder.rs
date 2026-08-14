@@ -621,6 +621,7 @@ impl<'a> NagaBuilder<'a> {
                             interpolation: None,
                             sampling: None,
                             blend_src: None,
+                            per_primitive: false,
                         }),
                         offset: 0,
                     }],
@@ -644,6 +645,7 @@ impl<'a> NagaBuilder<'a> {
                         interpolation: None,
                         sampling: None,
                         blend_src: None,
+                        per_primitive: false,
                     }),
                 });
             }
@@ -695,6 +697,7 @@ impl<'a> NagaBuilder<'a> {
                     Span::UNDEFINED,
                 ),
                 init: None,
+                memory_decorations: naga::MemoryDecorations::empty(),
             },
             Span::UNDEFINED,
         );
@@ -757,6 +760,7 @@ impl<'a> NagaBuilder<'a> {
                     interpolation: None,
                     sampling: None,
                     blend_src: None,
+                    per_primitive: false,
                 }),
             });
 
@@ -853,6 +857,7 @@ impl<'a> NagaBuilder<'a> {
                         Dimension::Cube => self.imagecube,
                     },
                     init: None,
+                    memory_decorations: naga::MemoryDecorations::empty(),
                 },
                 Span::UNDEFINED,
             );
@@ -873,6 +878,7 @@ impl<'a> NagaBuilder<'a> {
                         Span::UNDEFINED,
                     ),
                     init: None,
+                    memory_decorations: naga::MemoryDecorations::empty(),
                 },
                 Span::UNDEFINED,
             );
@@ -1788,6 +1794,9 @@ impl<'a> NagaBuilder<'a> {
             early_depth_test: None,
             workgroup_size: [0; 3],
             workgroup_size_overrides: None,
+            mesh_info: None,
+            task_payload: None,
+            incoming_ray_payload: None,
             function: self.func,
         };
 

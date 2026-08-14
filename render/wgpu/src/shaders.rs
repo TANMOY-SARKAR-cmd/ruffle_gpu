@@ -5,17 +5,6 @@ use ruffle_render::shader_source::SHADER_FILTER_COMMON;
 #[derive(Debug)]
 pub struct Shaders {
     pub color_shader: wgpu::ShaderModule,
-    /// Shader for instanced solid-colour rectangle rendering.
-    /// Uses only group(0) globals; each instance carries its own 2D affine
-    /// transform and premultiplied colour in a per-instance vertex buffer,
-    /// so no per-object transform uniform (group 1) is needed.
-    pub rect_instanced_shader: wgpu::ShaderModule,
-    /// Shader for instanced bitmap rendering.
-    /// Uses group(0) globals and group(1) bitmap (texture_transforms, texture,
-    /// sampler).  Each instance carries its own 2D affine transform and color
-    /// transforms in a per-instance vertex buffer, so no per-object transform
-    /// uniform is needed.
-    pub bitmap_instanced_shader: wgpu::ShaderModule,
     /// This has a pipeline-overridable `bool` constant, `late_saturate`,
     /// with a default of `false`. It switches to performing saturation
     /// after re-multiplying the alpha, rather than before. This is used
@@ -33,6 +22,17 @@ pub struct Shaders {
     pub glow_filter: wgpu::ShaderModule,
     pub bevel_filter: wgpu::ShaderModule,
     pub displacement_map_filter: wgpu::ShaderModule,
+    /// Shader for instanced solid-colour rectangle rendering.
+    /// Uses only group(0) globals; each instance carries its own 2D affine
+    /// transform and premultiplied colour in a per-instance vertex buffer,
+    /// so no per-object transform uniform (group 1) is needed.
+    pub rect_instanced_shader: wgpu::ShaderModule,
+    /// Shader for instanced bitmap rendering.
+    /// Uses group(0) globals and group(1) bitmap (texture_transforms, texture,
+    /// sampler).  Each instance carries its own 2D affine transform and color
+    /// transforms in a per-instance vertex buffer, so no per-object transform
+    /// uniform is needed.
+    pub bitmap_instanced_shader: wgpu::ShaderModule,
     /// Final-display post-process shader (FXAA + sharpen + colour correction).
     /// Used only for the scene → swapchain copy when formats match.
     #[cfg(feature = "gpu_post_process")]
@@ -46,16 +46,6 @@ pub struct Shaders {
 impl Shaders {
     pub fn new(device: &wgpu::Device) -> Self {
         let color_shader = make_shader(device, "color.wgsl", include_str!("../shaders/color.wgsl"));
-        let rect_instanced_shader = make_shader(
-            device,
-            "rect_instanced.wgsl",
-            include_str!("../shaders/rect_instanced.wgsl"),
-        );
-        let bitmap_instanced_shader = make_shader(
-            device,
-            "bitmap_instanced.wgsl",
-            include_str!("../shaders/bitmap_instanced.wgsl"),
-        );
         let bitmap_shader = make_shader(
             device,
             "bitmap.wgsl",
@@ -92,6 +82,28 @@ impl Shaders {
             "filter/displacement_map.wgsl",
             include_str!("../shaders/filter/displacement_map.wgsl"),
         );
+        let rect_instanced_shader = make_shader(
+            device,
+            "rect_instanced.wgsl",
+            include_str!("../shaders/rect_instanced.wgsl"),
+        );
+        let bitmap_instanced_shader = make_shader(
+            device,
+            "bitmap_instanced.wgsl",
+            include_str!("../shaders/bitmap_instanced.wgsl"),
+        );
+        #[cfg(feature = "gpu_post_process")]
+        let post_process_shader = make_shader(
+            device,
+            "post_process.wgsl",
+            include_str!("../shaders/post_process.wgsl"),
+        );
+        #[cfg(feature = "gpu_post_process")]
+        let post_process_srgb_shader = make_shader(
+            device,
+            "post_process_srgb.wgsl",
+            include_str!("../shaders/post_process_srgb.wgsl"),
+        );
         let gradient_shader = make_shader(
             device,
             "gradient.wgsl",
@@ -115,23 +127,8 @@ impl Shaders {
             ComplexBlend::HardLight => make_shader(device, "blend/hardlight.wgsl", include_str!("../shaders/blend/hardlight.wgsl")),
         };
 
-        #[cfg(feature = "gpu_post_process")]
-        let post_process_shader = make_shader(
-            device,
-            "post_process.wgsl",
-            include_str!("../shaders/post_process.wgsl"),
-        );
-        #[cfg(feature = "gpu_post_process")]
-        let post_process_srgb_shader = make_shader(
-            device,
-            "post_process_srgb.wgsl",
-            include_str!("../shaders/post_process_srgb.wgsl"),
-        );
-
         Self {
             color_shader,
-            rect_instanced_shader,
-            bitmap_instanced_shader,
             bitmap_shader,
             gradient_shader,
             copy_srgb_shader,
@@ -143,6 +140,8 @@ impl Shaders {
             glow_filter,
             bevel_filter,
             displacement_map_filter,
+            rect_instanced_shader,
+            bitmap_instanced_shader,
             #[cfg(feature = "gpu_post_process")]
             post_process_shader,
             #[cfg(feature = "gpu_post_process")]

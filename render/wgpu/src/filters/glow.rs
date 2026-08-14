@@ -94,8 +94,8 @@ impl GlowFilter {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         Self {
@@ -144,7 +144,7 @@ impl GlowFilter {
                         targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
                         compilation_options: Default::default(),
                     }),
-                    multiview: None,
+                    multiview_mask: None,
                     cache: None,
                 })
         })
@@ -201,7 +201,6 @@ impl GlowFilter {
                 &self.uniform_buffer,
                 0,
                 self.uniform_size,
-                &descriptors.device,
             )
             .copy_from_slice(bytemuck::cast_slice(&[GlowUniform {
                 color: [
@@ -221,7 +220,6 @@ impl GlowFilter {
                 &self.vertex_buffer,
                 0,
                 self.vertices_size,
-                &descriptors.device,
             )
             .copy_from_slice(bytemuck::cast_slice(&[
                 source.vertices_with_blur_offset(blur_offset)

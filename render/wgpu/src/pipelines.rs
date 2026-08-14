@@ -1,7 +1,7 @@
 use crate::blend::{ComplexBlend, TrivialBlend};
 use crate::layouts::BindLayouts;
 use crate::shaders::Shaders;
-use crate::{MaskState, PosColorVertex, PosVertex, BitmapInstance, RectInstance};
+use crate::{BitmapInstance, MaskState, PosColorVertex, PosVertex, RectInstance};
 use enum_map::{Enum, EnumMap, enum_map};
 use wgpu::{BlendState, PrimitiveTopology, vertex_attr_array};
 
@@ -23,55 +23,6 @@ pub const VERTEX_BUFFERS_DESCRIPTION_COLOR: [wgpu::VertexBufferLayout; 1] =
             1 => Float32x4,
         ],
     }];
-
-/// Two-slot vertex buffer layout for the instanced bitmap pipeline.
-///
-/// Slot 0 (`Vertex` step): unit-quad positions from the shared `Quad` buffer.
-/// Slot 1 (`Instance` step): per-bitmap `BitmapInstance` data — affine transform
-/// (ab, cd, txty), multiplicative color (mult_color), additive color (add_color),
-/// and UV sub-rectangle (uv_rect).
-pub const VERTEX_BUFFERS_DESCRIPTION_BITMAP_INSTANCED: [wgpu::VertexBufferLayout; 2] = [
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<PosVertex>() as u64,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &vertex_attr_array![0 => Float32x2],
-    },
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<BitmapInstance>() as u64,
-        step_mode: wgpu::VertexStepMode::Instance,
-        attributes: &vertex_attr_array![
-            1 => Float32x2,  // x_axis
-            2 => Float32x2,  // y_axis
-            3 => Float32x2,  // translation
-            4 => Float32x4,  // mult_color
-            5 => Float32x4,  // add_color
-            6 => Float32x4,  // uv_rect
-        ],
-    },
-];
-
-/// Two-slot vertex buffer layout for the instanced solid-colour rect pipeline.
-///
-/// Slot 0 (`Vertex` step): unit-quad positions from the shared `Quad` buffer.
-/// Slot 1 (`Instance` step): per-rect `RectInstance` data — affine transform
-/// (ab, cd, txty) and premultiplied colour.
-pub const VERTEX_BUFFERS_DESCRIPTION_RECT_INSTANCED: [wgpu::VertexBufferLayout; 2] = [
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<PosVertex>() as u64,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &vertex_attr_array![0 => Float32x2],
-    },
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<RectInstance>() as u64,
-        step_mode: wgpu::VertexStepMode::Instance,
-        attributes: &vertex_attr_array![
-            1 => Float32x2,  // ab
-            2 => Float32x2,  // cd
-            3 => Float32x2,  // txty
-            4 => Float32x4,  // color
-        ],
-    },
-];
 
 #[derive(Debug)]
 pub struct ShapePipeline {
@@ -156,7 +107,6 @@ impl Pipelines {
             &VERTEX_BUFFERS_DESCRIPTION_COLOR,
             &colort_bindings,
             BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            &[],
             PrimitiveTopology::TriangleList,
         );
 
@@ -169,7 +119,6 @@ impl Pipelines {
             &VERTEX_BUFFERS_DESCRIPTION_COLOR,
             &colort_bindings,
             BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            &[],
             PrimitiveTopology::LineStrip,
         );
 
@@ -188,7 +137,6 @@ impl Pipelines {
             &VERTEX_BUFFERS_DESCRIPTION_POS,
             &gradient_bindings,
             BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            &[],
             PrimitiveTopology::TriangleList,
         );
 
@@ -208,7 +156,6 @@ impl Pipelines {
                 &VERTEX_BUFFERS_DESCRIPTION_POS,
                 &complex_blend_bindings,
                 BlendState::REPLACE,
-                &[],
                 PrimitiveTopology::TriangleList,
             )
         };
@@ -232,7 +179,6 @@ impl Pipelines {
                     &VERTEX_BUFFERS_DESCRIPTION_POS,
                     &bitmap_blend_bindings,
                     blend.blend_state(),
-                    &[],
                     PrimitiveTopology::TriangleList,
                 )
             });
@@ -242,8 +188,12 @@ impl Pipelines {
         let bitmap_opaque_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: bitmap_opaque_pipeline_layout_label.as_deref(),
-                bind_group_layouts: &bitmap_blend_bindings,
-                push_constant_ranges: &[],
+                bind_group_layouts: &[
+                    Some(&bind_layouts.globals),
+                    Some(&bind_layouts.transforms),
+                    Some(&bind_layouts.bitmap),
+                ],
+                immediate_size: 0,
             });
 
         let bitmap_opaque = device.create_render_pipeline(&create_pipeline_descriptor(
@@ -270,8 +220,8 @@ impl Pipelines {
             &bitmap_opaque_pipeline_layout,
             Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Stencil8,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
+                depth_write_enabled: None,
+                depth_compare: None,
                 stencil: wgpu::StencilState {
                     front: wgpu::StencilFaceState::IGNORE,
                     back: wgpu::StencilFaceState::IGNORE,
@@ -306,13 +256,29 @@ impl Pipelines {
             &VERTEX_BUFFERS_DESCRIPTION_POS,
             &alpha_mask_bindings,
             BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            &[],
             PrimitiveTopology::TriangleList,
         );
 
         // Instanced colour-rect pipeline: unit-quad geometry in slot 0,
         // per-instance transform + colour in slot 1.  Only group(0) globals
         // are needed; no per-object transform uniform (group 1) is required.
+        let vertex_buffers_description_rect_instanced: [wgpu::VertexBufferLayout; 2] = [
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<PosVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &vertex_attr_array![0 => Float32x2],
+            },
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<RectInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &vertex_attr_array![
+                    1 => Float32x2, // x_axis
+                    2 => Float32x2, // y_axis
+                    3 => Float32x2, // translation
+                    4 => Float32x4, // color
+                ],
+            },
+        ];
         let rect_instanced_bindings = vec![&bind_layouts.globals];
         let rect_instanced_pipeline = create_shape_pipeline(
             "Rect Instanced",
@@ -320,10 +286,9 @@ impl Pipelines {
             format,
             &shaders.rect_instanced_shader,
             msaa_sample_count,
-            &VERTEX_BUFFERS_DESCRIPTION_RECT_INSTANCED,
+            &vertex_buffers_description_rect_instanced,
             &rect_instanced_bindings,
             BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            &[],
             PrimitiveTopology::TriangleList,
         );
 
@@ -331,21 +296,38 @@ impl Pipelines {
         // per-instance transform + color transforms in slot 1.  Group 0 is
         // globals; group 1 is the bitmap bind group (texture_transforms,
         // texture, sampler).  One pipeline variant per TrivialBlend.
+        let vertex_buffers_description_bitmap_instanced: [wgpu::VertexBufferLayout; 2] = [
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<PosVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &vertex_attr_array![0 => Float32x2],
+            },
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<BitmapInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &vertex_attr_array![
+                    1 => Float32x2, // x_axis
+                    2 => Float32x2, // y_axis
+                    3 => Float32x2, // translation
+                    4 => Float32x4, // mult_color
+                    5 => Float32x4, // add_color
+                    6 => Float32x4, // uv_rect
+                ],
+            },
+        ];
         let bitmap_instanced_bindings = vec![&bind_layouts.globals, &bind_layouts.bitmap];
         let bitmap_instanced_pipelines: [ShapePipeline; TrivialBlend::LENGTH] =
             std::array::from_fn(|blend| {
                 let blend = TrivialBlend::from_usize(blend);
-                let name = format!("Bitmap Instanced ({blend:?})");
                 create_shape_pipeline(
-                    &name,
+                    &format!("Bitmap Instanced ({blend:?})"),
                     device,
                     format,
                     &shaders.bitmap_instanced_shader,
                     msaa_sample_count,
-                    &VERTEX_BUFFERS_DESCRIPTION_BITMAP_INSTANCED,
-                    &bitmap_instanced_bindings,
+            &vertex_buffers_description_bitmap_instanced,
+            &bitmap_instanced_bindings,
                     blend.blend_state(),
-                    &[],
                     PrimitiveTopology::TriangleList,
                 )
             });
@@ -411,12 +393,11 @@ fn create_pipeline_descriptor<'a>(
             mask: !0,
             alpha_to_coverage_enabled: false,
         },
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     }
 }
 
-#[expect(clippy::too_many_arguments)]
 fn create_shape_pipeline(
     name: &str,
     device: &wgpu::Device,
@@ -426,14 +407,15 @@ fn create_shape_pipeline(
     vertex_buffers_layout: &[wgpu::VertexBufferLayout<'_>],
     bind_group_layouts: &[&wgpu::BindGroupLayout],
     blend: BlendState,
-    push_constant_ranges: &[wgpu::PushConstantRange],
     primitive_topology: PrimitiveTopology,
 ) -> ShapePipeline {
+    let bind_group_layouts_opt: Vec<Option<&wgpu::BindGroupLayout>> =
+        bind_group_layouts.iter().map(|l| Some(*l)).collect();
     let pipeline_layout_label = create_debug_label!("{} shape pipeline layout", name);
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: pipeline_layout_label.as_deref(),
-        bind_group_layouts,
-        push_constant_ranges,
+        bind_group_layouts: &bind_group_layouts_opt,
+        immediate_size: 0,
     });
 
     let mask_render_state = |mask_name, stencil_state, write_mask| {
@@ -444,8 +426,8 @@ fn create_shape_pipeline(
             &pipeline_layout,
             Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Stencil8,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
+                depth_write_enabled: None,
+                depth_compare: None,
                 stencil: wgpu::StencilState {
                     front: stencil_state,
                     back: stencil_state,

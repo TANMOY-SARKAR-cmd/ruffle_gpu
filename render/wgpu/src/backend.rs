@@ -13,8 +13,6 @@ use crate::{
     Descriptors, Error, QueueSyncHandle, RenderTarget, SwapChainTarget, Texture, as_texture,
     format_list, get_backend_names,
 };
-#[cfg(feature = "gpu_post_process")]
-use crate::PostProcessQuality;
 use image::imageops::FilterType;
 use ruffle_render::backend::{
     BitmapCacheEntry, Context3D, Context3DProfile, PixelBenderOutput, PixelBenderTarget,
@@ -40,6 +38,12 @@ use std::time::Instant;
 use swf::Color;
 use tracing::instrument;
 use wgpu::SubmissionIndex;
+#[cfg(feature = "gpu_post_process")]
+use crate::PostProcessQuality;
+
+// ---------------------------------------------------------------------------
+// Adaptive batch-limit controller (performance only; does not affect output)
+// ---------------------------------------------------------------------------
 
 /// Minimum batch size limit: never go below 256 instances per batch.
 const MIN_BATCH_LIMIT: usize = 256;
@@ -53,10 +57,10 @@ const MAX_BATCH_LIMIT: usize = 16_384;
 const EMA_ALPHA: f64 = 0.1;
 
 /// If the smoothed frame time (ms) exceeds this threshold, reduce batch limits.
-const PRESSURE_THRESHOLD_MS: f64 = 33.0; // ≈30 FPS
+const PRESSURE_THRESHOLD_MS: f64 = 33.0; // ~30 FPS
 
 /// If the smoothed frame time (ms) is below this threshold, raise batch limits.
-const RELIEF_THRESHOLD_MS: f64 = 20.0; // ≈50 FPS
+const RELIEF_THRESHOLD_MS: f64 = 20.0; // ~50 FPS
 
 /// Minimum number of frames that must elapse between consecutive batch-limit
 /// adjustments.  Prevents rapid oscillation when frame time hovers near a
@@ -71,25 +75,22 @@ const LERP_STEP_DOWN: f64 = 0.25;
 /// Fraction of the gap closed per adjustment when the batch limit is being
 /// *raised* (frame time below RELIEF_THRESHOLD).  A lower value (0.10) makes
 /// recovery deliberately slow: a rapid ramp-up would risk oscillation by
-/// returning to the high limit before the GPU has stabilised, triggering
-/// another pressure reduction immediately after.  Asymmetric rates (faster
-/// down, slower up) are a standard technique in adaptive-rate controllers to
-/// prevent sawtooth behaviour.
+/// triggering another reduction immediately (sawtooth).
 const LERP_STEP_UP: f64 = 0.10;
 
 /// Number of frames the EMA must be running before any batch-limit adjustment
 /// is permitted.  The first few frames often have artificially long durations
 /// (pipeline compilation, asset loading, first-frame overheads) that would
-/// otherwise cause a premature reduction.  Eight frames at 60 FPS ≈ 133 ms —
-/// enough for the EMA (α = 0.1) to incorporate several real samples and for
-/// transient start-up noise to subside.
+/// otherwise cause a premature reduction.  Eight frames at 60 FPS (~133 ms)
+/// is enough for the EMA (alpha = 0.1) to incorporate several real samples.
 const WARMUP_FRAMES: u64 = 8;
 
 /// Lightweight adaptive performance tracker.
 ///
 /// Measures wall-clock time between consecutive `submit_frame` calls, maintains
-/// a smoothed (EMA) frame time, and derives per-type batch limits (`rect_batch_limit`
-/// and `bitmap_batch_limit`) bounded by `MIN_BATCH_LIMIT` and `MAX_BATCH_LIMIT`.
+/// a smoothed (EMA) frame time, and derives per-type batch limits
+/// (`rect_batch_limit` and `bitmap_batch_limit`) bounded by `MIN_BATCH_LIMIT`
+/// and `MAX_BATCH_LIMIT`.
 ///
 /// # Safety guarantees
 /// * The batch limits only change *how many* instances are packed into a single
@@ -138,17 +139,14 @@ impl FrameMetrics {
     /// `begin_frame`.  Updates the EMA and adjusts both per-type batch limits.
     fn end_frame(&mut self, started_at: Instant) {
         let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-
         if self.initialized {
-            // Update EMA — unchanged from before.
+            // Update EMA.
             self.smoothed_ms = EMA_ALPHA * elapsed_ms + (1.0 - EMA_ALPHA) * self.smoothed_ms;
-
             // Warm-up gate: skip all adjustments until the EMA has been running
             // for WARMUP_FRAMES.  The first few frames often carry start-up
             // overheads (pipeline compilation, asset loading) that inflate
             // frame time and would otherwise trigger a premature reduction.
             let warmed_up = self.frame_index >= WARMUP_FRAMES;
-
             // Cooldown gate: only attempt an adjustment once per COOLDOWN_FRAMES
             // frames.  This prevents the controller from toggling every frame
             // when smoothed_ms hovers near a threshold, eliminating oscillation.
@@ -164,7 +162,6 @@ impl FrameMetrics {
                 // logic is not duplicated.
                 let new_rect = Self::compute_new_limit(self.rect_batch_limit, self.smoothed_ms);
                 let new_bitmap = Self::compute_new_limit(self.bitmap_batch_limit, self.smoothed_ms);
-
                 // Apply and track whether either limit actually changed so the
                 // cooldown window is only anchored to real adjustments.
                 let mut adjusted = false;
@@ -187,7 +184,6 @@ impl FrameMetrics {
                 }
             }
         }
-
         self.initialized = true;
         self.frame_index = self.frame_index.saturating_add(1);
     }
@@ -213,13 +209,14 @@ impl FrameMetrics {
         } else if smoothed_ms < RELIEF_THRESHOLD_MS && current < MAX_BATCH_LIMIT {
             // Headroom available: gradually recover toward the maximum.
             // Uses the smaller LERP_STEP_UP so recovery is deliberately
-            // conservative — a fast ramp-up after a pressure event risks
+            // conservative - a fast ramp-up after a pressure event risks
             // triggering another reduction immediately (sawtooth).
             // `ceil` ensures we always move strictly toward MAX and that
             // the limit can reach MAX_BATCH_LIMIT exactly when the
             // remaining gap shrinks below 1.0, avoiding an infinite
             // near-ceiling stall.
-            let new = current as f64 * (1.0 - LERP_STEP_UP) + MAX_BATCH_LIMIT as f64 * LERP_STEP_UP;
+            let new =
+                current as f64 * (1.0 - LERP_STEP_UP) + MAX_BATCH_LIMIT as f64 * LERP_STEP_UP;
             Some((new.ceil() as usize).min(MAX_BATCH_LIMIT))
         } else {
             None
@@ -227,30 +224,15 @@ impl FrameMetrics {
     }
 
     /// Current batch-size limit for `DrawRectInstanced` batches.
-    /// Adaptive adjustment is disabled; always returns `MAX_BATCH_LIMIT` to
-    /// eliminate timing non-determinism caused by EMA/lerp/cooldown logic.
     fn rect_batch_limit(&self) -> usize {
-        MAX_BATCH_LIMIT
+        self.rect_batch_limit
     }
 
     /// Current batch-size limit for `DrawBitmapInstanced` batches.
-    /// Adaptive adjustment is disabled; always returns `MAX_BATCH_LIMIT` to
-    /// eliminate timing non-determinism caused by EMA/lerp/cooldown logic.
     fn bitmap_batch_limit(&self) -> usize {
-        MAX_BATCH_LIMIT
+        self.bitmap_batch_limit
     }
 }
-
-// GPU-side timing is not used as a secondary signal for batch-limit control.
-//
-// `wgpu::Queue::submit` returns a `SubmissionIndex` but does not expose
-// queue depth, fence latency, or elapsed GPU time.  Obtaining those would
-// require enabling the `TIMESTAMP_QUERY` / `TIMESTAMP_QUERY_INSIDE_PASSES`
-// device features and wiring up a query-set pipeline — neither of which is
-// set up here.  Calling `Device::poll` synchronously in the render hot-path
-// to approximate GPU completion time would stall the CPU thread and negate
-// any benefit.  Wall-clock frame time (the EMA tracked above) is therefore
-// the sole signal used to drive the controller.
 
 /// Creates a wgpu instance with Ruffle's required configuration.
 ///
@@ -266,13 +248,14 @@ pub fn create_wgpu_instance(
     backends: wgpu::Backends,
     backend_options: wgpu::BackendOptions,
 ) -> wgpu::Instance {
-    wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends,
         flags: wgpu::InstanceFlags::default()
             .difference(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
             .with_env(),
         backend_options,
-        ..Default::default()
+        memory_budget_thresholds: Default::default(),
+        display: None,
     })
 }
 
@@ -290,9 +273,6 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     pub(crate) offscreen_buffer_pool: Arc<BufferPool<wgpu::Buffer, BufferDimensions>>,
     dynamic_transforms: DynamicTransforms,
     active_frame: ActiveFrame,
-    /// Lightweight adaptive performance tracker.  Measures per-frame wall-clock
-    /// time and derives a batch-size limit that is threaded through the rendering
-    /// pipeline.  Has no effect on game logic or ActionScript execution.
     frame_metrics: FrameMetrics,
 }
 
@@ -728,14 +708,11 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         commands: CommandList,
         cache_entries: Vec<BitmapCacheEntry>,
     ) {
-        // ── Frame-time measurement ────────────────────────────────────────────
-        // Record the wall-clock start so we can measure total frame cost and
-        // update the adaptive batch limits after submission completes.  This is
+        // Update the adaptive batch limits after submission completes.  This is
         // purely a performance hint; it does not affect game logic or AS3.
         let frame_start = self.frame_metrics.begin_frame();
         let rect_batch_limit = self.frame_metrics.rect_batch_limit();
         let bitmap_batch_limit = self.frame_metrics.bitmap_batch_limit();
-
         let frame_output = match self.target.get_next_texture() {
             Ok(frame) => frame,
             Err(e) => {
@@ -862,7 +839,6 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             .submit_for_target(&self.descriptors, &self.target, frame_output);
         self.offscreen_texture_pool = TexturePool::new();
 
-        // ── Update adaptive metrics after the frame has been submitted ────────
         self.frame_metrics.end_frame(frame_start);
     }
 
@@ -944,11 +920,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             depth_or_array_layers: 1,
         };
 
-        // Avoid forcing an immediate CPU-GPU sync for every texture update.
-        // We only need to flush if there is pending draw work that might alias this texture.
-        if self.active_frame.has_pending_draw_work() {
-            self.active_frame.submit_direct(&self.descriptors);
-        }
+        self.active_frame.submit_direct(&self.descriptors);
         self.descriptors.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture.texture,
@@ -1386,17 +1358,6 @@ pub async fn request_adapter_and_device(
             }
         })?;
 
-    let info = adapter.get_info();
-    if info.backend == wgpu::Backend::Vulkan {
-        tracing::info!("Explicitly selected Vulkan backend.");
-    }
-    tracing::info!(
-        "Selected GPU adapter: {} ({:?}) via {:?} backend",
-        info.name,
-        info.device_type,
-        info.backend,
-    );
-
     let (device, queue) = request_device(&adapter).await?;
     Ok((adapter, device, queue))
 }
@@ -1412,7 +1373,7 @@ async fn request_device(
     limits = limits.using_resolution(adapter.limits());
     limits = limits.using_alignment(adapter.limits());
     limits.max_uniform_buffer_binding_size = adapter.limits().max_uniform_buffer_binding_size;
-    limits.max_inter_stage_shader_components = adapter.limits().max_inter_stage_shader_components;
+    limits.max_inter_stage_shader_variables = adapter.limits().max_inter_stage_shader_variables;
     // This will be a default limit in a future wgpu version (down from 8).
     // It's required for some WebGL devices to be supported.
     limits.max_color_attachments = 4;
@@ -1484,7 +1445,7 @@ impl ActiveFrame {
             command_encoder: descriptors
                 .device
                 .create_command_encoder(&Default::default()),
-            staging_belt: wgpu::util::StagingBelt::new(4 * 1024 * 1024),
+            staging_belt: wgpu::util::StagingBelt::new(descriptors.device.clone(), 65536),
             draws_since_flush: 0,
         }
     }
@@ -1537,9 +1498,5 @@ impl ActiveFrame {
         if self.draws_since_flush > Self::MAX_DRAWS_PER_FLUSH {
             self.submit_direct(descriptors);
         }
-    }
-
-    pub fn has_pending_draw_work(&self) -> bool {
-        self.draws_since_flush > 0
     }
 }
