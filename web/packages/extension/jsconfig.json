@@ -4,6 +4,7 @@
         "lib": ["es2021"],
         "module": "es2022",
         "moduleResolution": "node",
+        "ignoreDeprecations": "6.0",
         "target": "es2021",
         "resolveJsonModule": true,
         "maxNodeModuleJsDepth": 0,

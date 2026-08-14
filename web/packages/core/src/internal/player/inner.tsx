@@ -55,19 +55,9 @@ declare global {
     interface AudioSession {
         type?: string;
     }
+    // NOTE: OrientationLockType and ScreenOrientation are now provided by
+    // TypeScript's built-in DOM lib; the local declarations were removed.
     // See https://github.com/microsoft/TypeScript-DOM-lib-generator/issues/1615
-    type OrientationLockType =
-        | "any"
-        | "landscape"
-        | "landscape-primary"
-        | "landscape-secondary"
-        | "natural"
-        | "portrait"
-        | "portrait-primary"
-        | "portrait-secondary";
-    interface ScreenOrientation extends EventTarget {
-        lock(orientation: OrientationLockType): Promise<void>;
-    }
 }
 
 /**

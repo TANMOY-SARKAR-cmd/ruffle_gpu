@@ -4,6 +4,7 @@
         "composite": true,
         "module": "es2020",
         "moduleResolution": "node",
+        "ignoreDeprecations": "6.0",
         "target": "es2021",
         "rootDir": "src",
         "outDir": "dist",
