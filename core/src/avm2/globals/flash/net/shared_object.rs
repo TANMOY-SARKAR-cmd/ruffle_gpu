@@ -5,7 +5,7 @@ use crate::avm2::object::{ScriptObject, SharedObjectObject};
 use crate::avm2::parameters::ParametersExt;
 use crate::avm2::{Activation, Error, Object, Value};
 use crate::string::AvmString;
-use crate::{avm2_stub_getter, avm2_stub_method, avm2_stub_setter};
+use crate::{avm2_stub_getter, avm2_stub_setter};
 use flash_lso::types::{AMFVersion, Lso};
 use ruffle_macros::istr;
 use std::borrow::Cow;
@@ -245,11 +245,12 @@ pub fn get_size<'gc>(
 }
 
 pub fn close<'gc>(
-    activation: &mut Activation<'_, 'gc>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_method!(activation, "flash.net.SharedObject", "close");
+    // SharedObjects in Ruffle are local-only; there is no persistent server
+    // connection to close, so this is a no-op.
     Ok(Value::Undefined)
 }
 

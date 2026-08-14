@@ -1,7 +1,7 @@
 use ruffle_core::backend::storage::StorageBackend;
 use std::fs;
 use std::fs::File;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 
 pub struct DiskStorageBackend {
@@ -42,7 +42,11 @@ impl StorageBackend for DiskStorageBackend {
         match std::fs::read(path) {
             Ok(data) => Some(data),
             Err(e) => {
-                tracing::warn!("Unable to read file \"{}\": {:?}", name, e);
+                if e.kind() == ErrorKind::NotFound {
+                    tracing::debug!("Unable to read file \"{}\": {:?}", name, e);
+                } else {
+                    tracing::warn!("Unable to read file \"{}\": {:?}", name, e);
+                }
                 None
             }
         }

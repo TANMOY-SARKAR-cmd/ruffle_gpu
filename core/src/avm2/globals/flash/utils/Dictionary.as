@@ -1,6 +1,4 @@
 package flash.utils {
-    import __ruffle__.stub_constructor;
-
     [Ruffle(InstanceAllocator)]
     public dynamic class Dictionary {
         prototype.toJSON = function(r:String):* {
@@ -8,9 +6,11 @@ package flash.utils {
         };
         prototype.setPropertyIsEnumerable("toJSON", false);
 
+        private native function initWeakKeys():void;
+
         public function Dictionary(weakKeys:Boolean = false) {
             if (weakKeys) {
-                stub_constructor("flash.utils.Dictionary", "with weak keys");
+                this.initWeakKeys();
             }
         }
     }

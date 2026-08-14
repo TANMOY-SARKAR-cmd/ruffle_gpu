@@ -63,7 +63,10 @@ impl GuiController {
     ) -> anyhow::Result<Self> {
         let (instance, backend) = select_wgpu_backend(preferences.graphics_backends().into())?;
         let surface = unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(window.as_ref())?)
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_display_and_window(
+                window.as_ref(),
+                window.as_ref(),
+            )?)
         }?;
         let (adapter, device, queue) = futures::executor::block_on(request_adapter_and_device(
             backend,
@@ -742,7 +745,7 @@ fn register_family_font(
     let (name, fontdata) = match load_system_font(font_database, query) {
         Ok((name, fontdata)) => (name, fontdata),
         Err(e) => {
-            tracing::warn!("Failed to register {query:?} as {family}: {e}");
+            tracing::debug!("Failed to register {query:?} as {family}: {e}");
             return;
         }
     };

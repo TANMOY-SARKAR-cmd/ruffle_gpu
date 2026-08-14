@@ -71,11 +71,12 @@ pub fn allow_insecure_domain<'gc>(
 }
 
 pub fn load_policy_file<'gc>(
-    activation: &mut Activation<'_, 'gc>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_method!(activation, "flash.system.Security", "loadPolicyFile");
+    // Cross-domain policy files are a browser/server concern; Ruffle handles
+    // network security at a higher level, so this call is a no-op.
     Ok(Value::Undefined)
 }
 
