@@ -10,6 +10,8 @@ use crate::surface::target::CommandTarget;
 use crate::{
     BitmapInstance, Descriptors, MaskState, Pipelines, RectInstance, Transforms, as_texture,
 };
+#[cfg(feature = "gpu_post_process")]
+use crate::PostProcessQuality;
 use ruffle_render::backend::ShapeHandle;
 use ruffle_render::bitmap::{BitmapHandle, PixelSnapping};
 use ruffle_render::commands::{CommandHandler, CommandList, RenderBlendMode};
@@ -1196,6 +1198,8 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         let mut surface = Surface::new(
             self.descriptors,
             self.quality,
+            #[cfg(feature = "gpu_post_process")]
+            PostProcessQuality::High,
             self.width,
             self.height,
             wgpu::TextureFormat::Rgba8Unorm,
@@ -1468,14 +1472,15 @@ impl CommandHandler for WgpuCommandHandler<'_> {
     fn render_alpha_mask(&mut self, maskee_commands: CommandList, mask_commands: CommandList) {
         self.flush_rect_batch();
         self.flush_bitmap_batch();
-        let mut surface = Surface::new(
+                let mut surface = Surface::new(
             self.descriptors,
             self.quality,
+            #[cfg(feature = "gpu_post_process")]
+            PostProcessQuality::High,
             self.width,
             self.height,
             wgpu::TextureFormat::Rgba8Unorm,
         );
-
         let maskee = surface.draw_commands(
             RenderTargetMode::FreshWithColor(wgpu::Color::TRANSPARENT),
             self.descriptors,

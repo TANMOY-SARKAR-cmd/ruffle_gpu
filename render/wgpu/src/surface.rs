@@ -13,6 +13,8 @@ use crate::utils::{remove_srgb, run_copy_pipeline, supported_sample_count};
 #[cfg(feature = "gpu_post_process")]
 use crate::utils::run_post_process_pipeline;
 use crate::{Descriptors, MaskState, Pipelines};
+#[cfg(feature = "gpu_post_process")]
+use crate::PostProcessQuality;
 use ruffle_render::commands::CommandList;
 use ruffle_render::pixel_bender_support::{ImageInputTexture, PixelBenderShaderArgument};
 use ruffle_render::quality::StageQuality;
@@ -27,6 +29,8 @@ use self::commands::ChunkBlendMode;
 pub struct Surface {
     size: wgpu::Extent3d,
     quality: StageQuality,
+    #[cfg(feature = "gpu_post_process")]
+    post_process_quality: PostProcessQuality,
     sample_count: u32,
     pipelines: Arc<Pipelines>,
     format: wgpu::TextureFormat,
@@ -37,6 +41,7 @@ impl Surface {
     pub fn new(
         descriptors: &Descriptors,
         quality: StageQuality,
+        #[cfg(feature = "gpu_post_process")] post_process_quality: PostProcessQuality,
         width: u32,
         height: u32,
         surface_format: wgpu::TextureFormat,
@@ -57,6 +62,8 @@ impl Surface {
         Self {
             size,
             quality,
+            #[cfg(feature = "gpu_post_process")]
+            post_process_quality,
             sample_count,
             pipelines,
             format: frame_buffer_format,
@@ -112,6 +119,7 @@ impl Surface {
                     target.globals(),
                     1,
                     draw_encoder,
+                    self.post_process_quality,
                 );
                 return;
             }
@@ -379,6 +387,11 @@ impl Surface {
 
     pub fn quality(&self) -> StageQuality {
         self.quality
+    }
+
+    #[cfg(feature = "gpu_post_process")]
+    pub fn post_process_quality(&self) -> PostProcessQuality {
+        self.post_process_quality
     }
 
     pub fn sample_count(&self) -> u32 {

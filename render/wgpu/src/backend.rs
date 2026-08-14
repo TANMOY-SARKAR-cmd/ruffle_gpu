@@ -13,6 +13,8 @@ use crate::{
     Descriptors, Error, QueueSyncHandle, RenderTarget, SwapChainTarget, Texture, as_texture,
     format_list, get_backend_names,
 };
+#[cfg(feature = "gpu_post_process")]
+use crate::PostProcessQuality;
 use image::imageops::FilterType;
 use ruffle_render::backend::{
     BitmapCacheEntry, Context3D, Context3DProfile, PixelBenderOutput, PixelBenderTarget,
@@ -433,6 +435,8 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         let surface = Surface::new(
             &descriptors,
             StageQuality::Low,
+            #[cfg(feature = "gpu_post_process")]
+            PostProcessQuality::High,
             target.width(),
             target.height(),
             target.format(),
@@ -628,6 +632,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         self.surface = Surface::new(
             &self.descriptors,
             self.surface.quality(),
+            #[cfg(feature = "gpu_post_process")]
+            self.surface.post_process_quality(),
             width,
             height,
             self.target.format(),
@@ -689,6 +695,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         self.surface = Surface::new(
             &self.descriptors,
             quality,
+            #[cfg(feature = "gpu_post_process")]
+            self.surface.post_process_quality(),
             self.surface.size().width,
             self.surface.size().height,
             self.target.format(),
@@ -747,6 +755,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             let mut surface = Surface::new(
                 &self.descriptors,
                 self.surface.quality(),
+                #[cfg(feature = "gpu_post_process")]
+                self.surface.post_process_quality(),
                 texture.texture.width(),
                 texture.texture.height(),
                 wgpu::TextureFormat::Rgba8Unorm,
@@ -993,6 +1003,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         let mut surface = Surface::new(
             &self.descriptors,
             quality,
+            #[cfg(feature = "gpu_post_process")]
+            PostProcessQuality::High,
             texture.texture.width(),
             texture.texture.height(),
             wgpu::TextureFormat::Rgba8Unorm,
