@@ -4,6 +4,8 @@ use crate::backends::{
 };
 use crate::cli::FilesystemAccessMode;
 use crate::cli::GameModePreference;
+#[cfg(feature = "gpu_post_process")]
+use crate::cli::PostProcessCli;
 use crate::custom_event::RuffleEvent;
 use crate::gui::{FilePicker, MovieView};
 use crate::preferences::GlobalPreferences;
@@ -51,6 +53,8 @@ pub struct LaunchOptions {
     pub filesystem_access_mode: FilesystemAccessMode,
     pub gamepad_button_mapping: HashMap<GamepadButton, KeyCode>,
     pub avm2_optimizer_enabled: bool,
+    #[cfg(feature = "gpu_post_process")]
+    pub post_process: PostProcessCli,
 }
 
 impl From<&GlobalPreferences> for LaunchOptions {
@@ -97,6 +101,8 @@ impl From<&GlobalPreferences> for LaunchOptions {
             tcp_connections: value.cli.tcp_connections,
             gamepad_button_mapping: HashMap::from_iter(value.cli.gamepad_button.iter().cloned()),
             avm2_optimizer_enabled: !value.cli.no_avm2_optimizer,
+            #[cfg(feature = "gpu_post_process")]
+            post_process: value.cli.post_process,
         }
     }
 }
@@ -193,6 +199,8 @@ impl ActivePlayer {
                     filesystem_access_mode: opt.filesystem_access_mode,
                     gamepad_button_mapping: opt.gamepad_button_mapping.clone(),
                     avm2_optimizer_enabled: opt.avm2_optimizer_enabled,
+                    #[cfg(feature = "gpu_post_process")]
+                    post_process: opt.post_process,
                 })
             }
         };
@@ -265,9 +273,21 @@ impl ActivePlayer {
             GameModePreference::Off => false,
         };
 
-        let renderer = WgpuRenderBackend::new(descriptors, movie_view)
+        // `mut` is only required when the post-process feature is enabled,
+        // since that is the only code path that mutates the renderer before
+        // handing it to the player builder.
+        #[allow(unused_mut)]
+        let mut renderer = WgpuRenderBackend::new(descriptors, movie_view)
             .map_err(|e| anyhow!(e.to_string()))
             .expect("Couldn't create wgpu rendering backend");
+
+        // Apply the user's runtime post-process quality choice (from
+        // `--post-process`, default `high`). Without the `gpu_post_process`
+        // feature this call is a no-op: the final copy stays the original
+        // nearest-sampler pipeline.
+        #[cfg(feature = "gpu_post_process")]
+        renderer.set_post_process_quality(opt.post_process.to_quality());
+
         RENDER_INFO.with(|i| *i.borrow_mut() = Some(renderer.debug_info().to_string()));
 
         // Enable the dummy ExternalInterface by default so that games calling

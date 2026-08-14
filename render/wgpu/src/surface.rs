@@ -393,6 +393,17 @@ impl Surface {
         self.post_process_quality
     }
 
+    /// Update the runtime post-process quality setting.
+    ///
+    /// Takes effect from the next presented frame: the final scene-to-swapchain
+    /// copy will use the new quality mode (full pipeline / bilinear copy /
+    /// nearest passthrough). No pipelines are recreated — the quality mode is
+    /// resolved at presentation time, so this call is effectively free.
+    #[cfg(feature = "gpu_post_process")]
+    pub fn set_post_process_quality(&mut self, quality: PostProcessQuality) {
+        self.post_process_quality = quality;
+    }
+
     pub fn sample_count(&self) -> u32 {
         self.sample_count
     }

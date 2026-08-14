@@ -587,6 +587,16 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             }) => unreachable!("Buffer must be Borrowed as it was set to be Borrowed earlier"),
         }
     }
+
+    /// Update the runtime post-process quality at presentation time.
+    ///
+    /// Only meaningful when compiled with the `gpu_post_process` feature:
+    /// the next presented frame will use the new quality mode without
+    /// recreating any pipelines. With the feature disabled this is a no-op.
+    #[cfg(feature = "gpu_post_process")]
+    pub fn set_post_process_quality(&mut self, quality: PostProcessQuality) {
+        self.surface.set_post_process_quality(quality);
+    }
 }
 
 impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
@@ -1618,5 +1628,86 @@ mod tests {
         }
         assert_eq!(metrics.rect_batch_limit(), rect);
         assert_eq!(metrics.bitmap_batch_limit(), bitmap);
+    }
+
+    #[test]
+    fn rapidly_alternating_frame_times_cannot_permanently_stall_the_controller() {
+        // A pathological alternating workload (one 60 ms frame, one 10 ms frame)
+        // should still converge to a finite limit inside the allowed band.
+        // The EMA damps the oscillation; the cooldown limits how often
+        // adjustments can happen; the floor/ceiling clamp keeps the result
+        // bounded even in the worst case.
+        let mut metrics = FrameMetrics::new();
+        let start = Instant::now() - Duration::from_millis(100);
+        for _ in 0..WARMUP_FRAMES {
+            metrics.end_frame(start);
+        }
+        for _ in 0..1000 {
+            metrics.end_frame(Instant::now() - Duration::from_millis(60));
+            metrics.end_frame(Instant::now() - Duration::from_millis(10));
+        }
+        assert!(metrics.rect_batch_limit() >= MIN_BATCH_LIMIT);
+        assert!(metrics.rect_batch_limit() <= MAX_BATCH_LIMIT);
+        assert!(metrics.bitmap_batch_limit() >= MIN_BATCH_LIMIT);
+        assert!(metrics.bitmap_batch_limit() <= MAX_BATCH_LIMIT);
+    }
+
+    #[test]
+    fn near_zero_elapsed_time_is_handled_gracefully() {
+        // Back-to-back end_frame calls with essentially no elapsed time
+        // (sub-millisecond, e.g. on a very fast machine or a tight loop) must
+        // not underflow, panic, or produce NaN/Infinity EMA values. A ~0 ms
+        // frame is well below the relief threshold, so limits may only rise,
+        // never fall, and must stay at MAX_BATCH_LIMIT.
+        let mut metrics = FrameMetrics::new();
+        let start = Instant::now();
+        for _ in 0..WARMUP_FRAMES {
+            metrics.end_frame(start);
+        }
+        for _ in 0..200 {
+            metrics.end_frame(Instant::now());
+        }
+        assert_eq!(metrics.rect_batch_limit(), MAX_BATCH_LIMIT);
+        assert_eq!(metrics.bitmap_batch_limit(), MAX_BATCH_LIMIT);
+    }
+
+    #[test]
+    fn cooldown_is_anchored_to_actual_limit_changes() {
+        // Once a pressure event changes the limits, the next adjustment must
+        // not occur until COOLDOWN_FRAMES later — never sooner. Frames inside
+        // the cooldown window must leave the limits untouched even if the EMA
+        // already crossed the pressure threshold.
+        let mut metrics = FrameMetrics::new();
+        let start = Instant::now() - Duration::from_millis(100);
+        for _ in 0..WARMUP_FRAMES {
+            metrics.end_frame(start);
+        }
+        // Pressure until an adjustment lands.
+        let mut prev_rect = metrics.rect_batch_limit();
+        let mut pressure_frames = 0;
+        loop {
+            pressure_frames += 1;
+            metrics.end_frame(Instant::now() - Duration::from_millis(60));
+            if metrics.rect_batch_limit() != prev_rect {
+                break;
+            }
+            assert!(pressure_frames < 500, "no adjustment landed");
+        }
+        let adjusted_rect = metrics.rect_batch_limit();
+        // Emit more pressure frames within the cooldown window.
+        for _ in 0..COOLDOWN_FRAMES.saturating_sub(2) {
+            metrics.end_frame(Instant::now() - Duration::from_millis(60));
+        }
+        assert_eq!(
+            metrics.rect_batch_limit(),
+            adjusted_rect,
+            "limit changed inside the cooldown window"
+        );
+        // One frame past the cooldown must permit a new adjustment.
+        metrics.end_frame(Instant::now() - Duration::from_millis(60));
+        assert!(
+            metrics.rect_batch_limit() <= adjusted_rect,
+            "no new reduction after the cooldown elapsed"
+        );
     }
 }

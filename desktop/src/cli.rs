@@ -32,6 +32,35 @@ fn get_default_cache_directory() -> std::path::PathBuf {
         .join("ruffle")
 }
 
+/// Command-line values for the optional GPU post-processing pipeline quality.
+///
+/// Exists as a CLI-facing enum so that `--post-process` is documented and
+/// parsed even when the `gpu_post_process` feature is disabled (the flag is
+/// then hidden and has no runtime effect).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PostProcessCli {
+    /// Original nearest-sampler copy: no FXAA, no sharpening, no colour
+    /// correction, zero GPU overhead.
+    Off,
+    /// Bilinear copy only: smooth scaling without edge processing.
+    Low,
+    /// Full pipeline: bilinear sampling, FXAA, sharpening, colour correction.
+    High,
+}
+impl PostProcessCli {
+    /// Map to the renderer's post-process quality. Without the
+    /// `gpu_post_process` feature there is no pass to configure; callers
+    /// should skip the mapping in that case.
+    #[cfg(feature = "gpu_post_process")]
+    pub fn to_quality(self) -> ruffle_render_wgpu::PostProcessQuality {
+        match self {
+            Self::Off => ruffle_render_wgpu::PostProcessQuality::Off,
+            Self::Low => ruffle_render_wgpu::PostProcessQuality::Low,
+            Self::High => ruffle_render_wgpu::PostProcessQuality::High,
+        }
+    }
+}
+
 #[derive(Parser, Debug, Clone)]
 #[clap(
     name = "Ruffle",
@@ -54,6 +83,20 @@ pub struct Opt {
     /// This option temporarily overrides any stored preference.
     #[clap(long, short)]
     pub graphics: Option<GraphicsBackend>,
+
+    /// Quality of the optional GPU post-processing pipeline (FXAA + sharpen +
+    /// colour correction) applied to the final scene-to-swapchain copy.
+    ///
+    /// Only effective when this build was compiled with the `gpu_post_process`
+    /// cargo feature enabled. `off` passes the original nearest-sampler copy
+    /// through (zero overhead); `low` uses a bilinear copy; `high` runs the
+    /// full post-processing pipeline.
+    ///
+    /// Default: high.
+    #[clap(long, value_name = "QUALITY", default_value = "high", value_enum, hide_default_value = true)]
+    #[cfg_attr(not(feature = "gpu_post_process"), clap(hide = true))]
+    pub post_process: PostProcessCli,
+
 
     /// Power preference for the graphics device used. High power usage tends to prefer dedicated GPUs,
     /// whereas a low power usage tends prefer integrated GPUs.

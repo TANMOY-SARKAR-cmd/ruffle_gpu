@@ -91,6 +91,7 @@ fontconfig = ["dep:fontconfig"]
 
 # wgpu features
 render_debug_labels = ["ruffle_render_wgpu/render_debug_labels"]
+gpu_post_process = ["ruffle_render_wgpu/gpu_post_process"]
 
 # sandboxing
 sandbox = []
