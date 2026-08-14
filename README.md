@@ -2,177 +2,90 @@
   <a href="https://ruffle.rs"><img alt="Ruffle" src="https://ruffle.rs/logo.svg" /></a>
 </p>
 <p align="center">
-  <a href="https://github.com/ruffle-rs/ruffle/actions"><img alt="Rust Build Status" src="https://img.shields.io/github/actions/workflow/status/ruffle-rs/ruffle/test_rust.yml?label=Rust%20Build&logo=github&branch=master" /></a>
-  <a href="https://github.com/ruffle-rs/ruffle/actions/workflows/test_web.yml"><img alt="Web Build Status" src="https://img.shields.io/github/actions/workflow/status/ruffle-rs/ruffle/test_web.yml?label=Web%20Build&logo=github&branch=master" /></a>
-  <a href="https://flathub.org/apps/rs.ruffle.Ruffle"><img alt="Ruffle Flathub" src="https://img.shields.io/flathub/v/rs.ruffle.Ruffle?color=007acc&logo=flathub" /></a>
-  <a href="https://www.npmjs.com/package/@ruffle-rs/ruffle"><img alt="Ruffle npm" src="https://img.shields.io/npm/v/@ruffle-rs/ruffle?color=007acc&logo=npm" /></a>
-  <a href="https://aur.archlinux.org/packages/ruffle-nightly-bin"><img alt="Ruffle AUR" src="https://img.shields.io/aur/version/ruffle-nightly-bin?logo=archlinux" /></a>
-  <a href="https://discord.gg/ruffle"><img alt="Ruffle Discord" src="https://img.shields.io/discord/610531541889581066?label=&color=7389d8&labelColor=6a7ec2&logoColor=ffffff&logo=discord" /></a>
-  <a href="https://crowdin.com/project/ruffle"><img alt="Ruffle translations" src="https://badges.crowdin.net/ruffle/localized.svg" /></a>
+  <a href="https://github.com/TANMOY-SARKAR-cmd/ruffle_gpu/actions"><img alt="Build Status" src="https://img.shields.io/github/actions/workflow/status/TANMOY-SARKAR-cmd/ruffle_gpu/build_and_release.yml?label=Build&logo=github&branch=main" /></a>
   <br />
-  <strong><a href="https://ruffle.rs">website</a> | <a href="https://ruffle.rs/demo">demo</a> | <a href="https://github.com/ruffle-rs/ruffle/releases">nightly builds</a> | <a href="https://github.com/ruffle-rs/ruffle/wiki">wiki</a></strong>
+  <strong><a href="https://ruffle.rs">website</a> | <a href="https://github.com/TANMOY-SARKAR-cmd/ruffle_gpu">repository</a> | <a href="https://github.com/TANMOY-SARKAR-cmd/ruffle_gpu/releases">releases</a> | <a href="GPU_ENHANCEMENTS.md">GPU enhancements (design notes)</a></strong>
 </p>
 
-# Ruffle
+# Ruffle GPU
 
-Ruffle is an Adobe Flash Player emulator written in the Rust programming language. Ruffle targets both the desktop and the web using WebAssembly.
+**Ruffle GPU** is a personal, actively-developed fork of [Ruffle](https://ruffle.rs) — the open-source Adobe Flash Player emulator written in Rust. It tracks the [official Ruffle repository](https://github.com/ruffle-rs/ruffle) and layers a small set of GPU-oriented enhancements on top: an **adaptive batch-limit controller** for the wgpu renderer, an **optional full-screen post-processing pipeline** (FXAA anti-aliasing, sharpening, and colour correction), and **instanced-draw batching improvements**. The goal is to keep Ruffle's pixel-faithful Flash reproduction as the default behaviour while offering performance-smoothing and visual-quality options for real hardware.
 
-## Table of Contents
-* [Project status](#project-status)
-* [Using Ruffle](#using-ruffle)
-* [Building from source](#building-from-source)
-  * [Prerequisites](#prerequisites)
-  * [Linux prerequisites](#linux-prerequisites)
-  * [Desktop](#desktop)
-    * [Build](#build)
-    * [macOS](#macos)
-  * [Web or Extension](#web-or-extension)
-  * [Android](#android)
-  * [Scanner](#scanner)
-  * [Exporter](#exporter)
-* [Structure](#structure)
-* [Sponsors](#sponsors)
-* [License](#license)
-* [Contributing](#contributing)
+Everything else in this repository is stock Ruffle: the ActionScript 1/2 and 3 virtual machines, the audio/video subsystems, the web and desktop frontends, and the complete test infrastructure all come from upstream unchanged.
 
+## Enhancements in this fork
 
-## Project status
+| Enhancement | Crate | Default | What it does |
+| --- | --- | --- | --- |
+| Adaptive batch-limit controller | `render/wgpu` | **on** | Monitors wall-clock frame time with an exponential moving average and automatically reduces or recovers the instanced batch-size limits (`DrawRectInstanced`, `DrawBitmapInstanced`) when the GPU is under pressure. Purely a performance hint: it never changes which commands are issued, never skips or merges frames, and never touches ActionScript execution. See `GPU_ENHANCEMENTS.md` for the design rationale and the constants used. |
+| GPU post-processing pipeline | `render/wgpu` (`gpu_post_process` feature) | **off** (compile-time opt-in) | An optional final fullscreen pass that applies FXAA, a sharpening kernel, and a mild colour correction to the scene-to-swapchain copy only. Intermediate render targets (bitmap caches, filters, Context3D textures) are never affected. Documentation: [`render/wgpu/README.md`](render/wgpu/README.md). |
+| Instanced drawing | `render/wgpu` | **on** | Batched instanced draws for rectangles and bitmaps, reducing draw-call overhead on scenes with many repeated primitives. |
 
-Ruffle supports ActionScript 1, 2 and 3 pretty well, but it's still not finished by any means. Please report any issues in the [Issue Tracker](https://github.com/ruffle-rs/ruffle/issues).
+The adaptive controller's constants (EMA smoothing factor, pressure/relief thresholds, warm-up window, cooldown, per-step lerp rates, and min/max batch limits) are each documented with a one-line rationale next to their definition in [`render/wgpu/src/backend.rs`](render/wgpu/src/backend.rs) and in the design note. They are easy to retune for a particular GPU or workload; see `GPU_ENHANCEMENTS.md`.
 
-## Using Ruffle
+## Relationship to upstream Ruffle
 
-The easiest way to try out Ruffle is to visit the [web demo page](https://ruffle.rs/demo/), then click the "Select File" button to load a SWF file of your choice.
+This fork rebases regularly on the official [ruffle-rs/ruffle](https://github.com/ruffle-rs/ruffle) `master` branch. Two of the three enhancements — the adaptive batch-limit controller and the instanced-drawing batching — are designed to be **upstreamable**: they do not change rendered output and are strictly performance improvements. The third — the post-processing pipeline — is deliberately kept as an **optional, off-by-default compile-time feature** precisely so it can coexist with Ruffle's pixel-faithfulness philosophy; it is not proposed for upstream.
 
-[Nightly builds](https://ruffle.rs/downloads#nightly-releases) of Ruffle are available for desktop and web platforms.
+If you want a vanilla Ruffle experience, build and use upstream Ruffle instead of this fork. If you want these GPU extras, track this repository and rebase on upstream releases in the usual way.
 
-For more detailed instructions, see our [wiki page](https://github.com/ruffle-rs/ruffle/wiki/Using-Ruffle).
+## Enabling the GPU post-processing pipeline
+
+The post-process pass is behind the `gpu_post_process` cargo feature and is off by default. Build with:
+
+```sh
+# Check the default (no post-process) build
+cargo check -p ruffle_render_wgpu
+
+# Check / build with the post-processing pipeline enabled
+cargo check -p ruffle_render_wgpu --features gpu_post_process
+cargo build --release --features gpu_post_process
+
+# Run the desktop player with the full FXAA + sharpen + colour pass
+./target/release/ruffle_desktop movie.swf
+```
+
+Quality can be selected at the scene-presentation level: `PostProcessQuality::High` (default when the feature is on) runs the full pipeline, `Low` runs a bilinear copy only, and `Off` falls back to the original nearest-sampler copy with zero overhead. The pass is automatically skipped at `StageQuality::Low`, mirroring Flash's no-anti-aliasing behaviour, and the sRGB surface variant (`post_process_srgb.wgsl`) handles platforms whose swapchain format differs from the internal render format.
+
+## Known fidelity trade-offs
+
+> The post-processing pass (when enabled) alters **every displayed pixel**. It is an intentional visual-quality enhancement, not a bug fix. Pixel-art content and crisp UI may look softer or "enhanced" rather than Flash-faithful. Keep the feature disabled whenever you need bit-exact reproduction, and enabled only as a deliberate end-user quality option.
+
+Everything outside the post-process feature is output-identical to upstream Ruffle: the adaptive batch controller changes only how many instances are packed per draw call, and the instanced drawing improvements do not alter rasterisation.
 
 ## Building from source
 
-### Prerequisites
+The build prerequisites are identical to upstream Ruffle. In short, on Linux you need the latest stable channel of [Rust](https://www.rust-lang.org/tools/install) and Java on your `PATH` as `java` (required to build the ActionScript 3 builtin class library), plus these typical system dependencies:
 
-* Latest stable channel of [Rust](https://www.rust-lang.org/tools/install)
-* Java, available on your PATH as `java` (required for building the library containing the builtin Flash classes for ActionScript 3)
+```sh
+# Ubuntu/Debian
+sudo apt install pkg-config libasound2-dev libudev-dev default-jre-headless g++
+# Fedora/RHEL
+sudo dnf install pkgconf-pkg-config alsa-lib-devel systemd-devel java-latest-openjdk-headless gcc-c++
+```
 
-### Linux prerequisites
+Then:
 
-The following are typical dependencies for Linux:
-
-* Ubuntu/Debian:
-  ```shell
-  sudo apt install pkg-config libasound2-dev libudev-dev default-jre-headless g++
-  ```
-
-* Fedora/RHEL:
-  ```shell
-  sudo dnf install pkgconf-pkg-config alsa-lib-devel systemd-devel java-latest-openjdk-headless gcc-c++
-  ```
-
-### Desktop
-
-#### Build
-
-Use the following command to build and run the desktop app:
-
-`cargo run --release --package=ruffle_desktop`
-
-To run a specific SWF file, pass the SWF path as an argument:
-
-`cargo run --release --package=ruffle_desktop -- test.swf`
-
-To build in debug mode, simply omit `--release` from the command.
-
-#### macOS
-
-Ruffle desktop can be built from our [Homebrew Tap](https://github.com/ruffle-rs/homebrew-ruffle/):
-
-`brew install --HEAD ruffle-rs/ruffle/ruffle`
-
-_Note: because it is HEAD-only, you'll need to run `brew upgrade --fetch-HEAD ruffle` each time you want to update._
-
-### Web or Extension
-
-Follow [the instructions in the web directory](web/README.md#building-from-source) for building
-either the web or browser extension version of Ruffle.
-
-This project is tested with BrowserStack.
-
-### Android
-
-Follow the [instructions](https://github.com/ruffle-rs/ruffle-android/blob/main/CONTRIBUTING.md#building-from-source) in the `ruffle-android` project for building the Android application of Ruffle.
-
-### Scanner
-
-If you have a collection of "real world" SWFs to test against, the scanner may be used to benchmark
-ruffle's parsing capabilities. Provided with a folder and an output filename, it will attempt to read
-all of the Flash files and report on the success of such a task.
-
-`cargo run --release --package=ruffle_scanner -- scan folder/with/swfs/ results.csv`
-
-### Exporter
-
-If you have a SWF file and would like to capture an image of it, you may use the exporter tool.
-This currently requires hardware acceleration, but can be run headless (with no window).
-
-- `cargo run --release --package=exporter -- path/to/file.swf`
-- `cargo run --release --package=exporter -- path/to/file.swf path/to/screenshots --frames 5`
+```sh
+cargo build --release                              # default: stock Ruffle + adaptive batching
+cargo build --release --features gpu_post_process  # + post-processing pipeline
+```
 
 ## Structure
 
-- `core` - core emulator and common code
-- `swf` - SWF and ActionScript parser
-- `desktop` - desktop client (uses `wgpu-rs`)
-- `web` - web client and browser extension (uses `wasm-bindgen`)
-- `render` - various rendering backends for both desktop and web
-- `video` - video decoding backends
-- `flv` - Flash Video decoder
-- `wstr` - a Flash-compatible implementation of strings
-- `scanner` - a utility to bulk parse SWF files
-- `exporter` - a utility to generate PNG screenshots of a SWF file
-
-## Sponsors
-
-You can support the development of Ruffle via [GitHub Sponsors](https://github.com/sponsors/ruffle-rs). Your sponsorship will help to ensure the accessibility of Flash content for the future. Thank you!
-
-Sincere thanks to the diamond level sponsors of Ruffle:
-
-<p align="center">
-  <a href="https://www.newgrounds.com"><img src="https://ruffle.rs/sponsors/newgrounds.png" alt="Newgrounds.com"></a>
-  <a href="https://www.cpmstar.com"><img src="https://ruffle.rs/sponsors/cpmstar.png" alt="CPMStar"></a>
-  <a href="https://deepnight.net"><img src="https://ruffle.rs/sponsors/deepnight.png" alt="Sébastien Bénard"></a>
-  <a href="https://www.crazygames.com"><img src="https://ruffle.rs/sponsors/crazygames.png" alt="Crazy Games"></a>
-  <a href="https://www.coolmathgames.com"><img src="https://ruffle.rs/sponsors/coolmathgames.png" alt="Cool Math Games"></a>
-  <a href="https://www.nytimes.com/"><img src="https://ruffle.rs/sponsors/nyt.png" alt="The New York Times"></a>
-  <a href="https://www.armorgames.com/"><img src="https://ruffle.rs/sponsors/armorgames.png" alt="Armor Games"></a>
-  <a href="https://www.ondaeduca.com/"><img src="https://ruffle.rs/sponsors/ondaeduca.png" alt="Onda Educa"></a>
-  <a href="https://www.twoplayergames.org/"><img src="https://ruffle.rs/sponsors/twoplayergames.png" alt="TwoPlayerGames.org"></a>
-  <a href="https://www.wowgame.jp/"><img src="https://ruffle.rs/sponsors/wowgame.png" alt="wowgame.jp"></a>
-  <a href="http://kupogames.com/"><img src="https://ruffle.rs/sponsors/mattroszak.png" alt="Matt Roszak"></a>
-  <a href="https://www.dolldivine.com/"><img src="https://ruffle.rs/sponsors/dolldivine.png" alt="Doll Divine"></a>
-  <a href="https://movavi.com/"><img src="https://ruffle.rs/sponsors/movavi.svg" alt="Movavi"></a>
-  <a href="https://www.kongregate.com/"><img src="https://ruffle.rs/sponsors/kongregate.svg" alt="Kongregate"></a>
-  <a href="https://www.bubbleshooter.net/"><img src="https://ruffle.rs/sponsors/bubble-shooter.png" alt="Bubble Shooter"></a>
-  <a href="https://www.neopets.com/"><img src="https://ruffle.rs/sponsors/neopets.png" alt="Neopets"></a>
-</p>
+Inherited from upstream: the workspace is made up of `core` (the ActionScript VMs and player), `desktop`, `web`, `render` and its backends (`wgpu`, `webgl`, `canvas`), `swf` (file format parsing), `flv`, `video`, `naga-agal`/`naga-pixelbender` (shader translators), `exporter`, `scanner`, and `frontend-utils`. The fork's own additions live in `render/wgpu` (`backend.rs` adaptive controller, `surface.rs` post-process presentation path, `utils.rs` post-process pipeline helpers, `shaders/post_process*.wgsl`) and in `GPU_ENHANCEMENTS.md` at the repository root.
 
 ## License
 
-Ruffle is licensed under either of
-
-- Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0)
-- MIT License (http://opensource.org/licenses/MIT)
-
-at your option.
-
-Ruffle depends on third-party libraries under compatible licenses. See [LICENSE.md](LICENSE.md) for full information.
+Inherited from upstream Ruffle: the code in this repository is licensed under either [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) or [MIT License](https://opensource.org/licenses/MIT), at your option. Ruffle depends on third-party libraries under compatible licenses; see [LICENSE.md](LICENSE.md) for full information.
 
 ### Contributing
 
-Ruffle welcomes contribution from everyone. See [CONTRIBUTING.md](CONTRIBUTING.md) for help getting started.
+Contributions to the GPU-specific code (`render/wgpu`) are welcome: performance improvements, controller tuning, or new optional visual features that respect the "off or opt-in by default" rule. Upstream-eligible improvements (output-identical performance work) are encouraged. Please keep the workspace green under both feature configurations before opening a change:
 
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you shall be dual licensed as above, without any
-additional terms or conditions.
-
-The entire Ruffle community, including the chat room and GitHub project, is expected to abide by the [Code of Conduct](https://www.rust-lang.org/policies/code-of-conduct) that the Rust project itself follows.
+```sh
+cargo check --workspace
+cargo check -p ruffle_render_wgpu --features gpu_post_process
+cargo clippy --workspace
+cargo test -p ruffle_render_wgpu --lib
+```

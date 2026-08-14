@@ -35,6 +35,19 @@ affected — only what the user actually sees on screen.
 > ruffle_render_wgpu = { features = ["gpu_post_process"] }
 > ```
 
+### Interaction with filters, bitmap caches, and Context3D
+
+The post-process pass only intercepts the **last** copy (the rendered offscreen scene → swapchain). Every intermediate render target keeps using the plain copy pipeline, so game-logic pixels are never altered:
+
+| Subsystem | Render path | Post-process effect |
+| --- | --- | --- |
+| Normal display list | Offscreen frame → swapchain | **Affected** (the final pass) |
+| Bitmap cache / filter targets | Separate offscreen textures via `run_copy_pipeline` | **Unaffected** |
+| Context3D (Stage3D) framebuffers | Own framebuffers | **Unaffected** — but Stage3D output *composited into the main scene* is processed, because it becomes part of the final scene texture |
+| Mask stencils / blend intermediates | Internal pipeline state | **Unaffected** |
+
+Filters (blur, glow, drop shadow, …) and cached bitmaps are rasterised, cached, and composited exactly as upstream Ruffle does; only the resulting picture that reaches the screen may receive FXAA / sharpen / colour correction. The `StageQuality::Low` skip means Flash's own no-anti-aliasing mode disables the pass entirely, and the `post_process_srgb.wgsl` variant handles platforms whose swapchain format differs from the internal render format (consistent with the existing `copy_srgb` pipeline).
+
 Two implementation notes worth knowing when extending this pass:
 
 - The pass respects `StageQuality`: it is skipped at `StageQuality::Low`,

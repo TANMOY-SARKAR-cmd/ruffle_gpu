@@ -43,9 +43,9 @@ resolver = "2"
 [workspace.package]
 authors = ["Ruffle LLC <ruffle@ruffle.rs>"]
 edition = "2024"
-homepage = "https://ruffle.rs"
+homepage = "https://github.com/TANMOY-SARKAR-cmd/ruffle_gpu"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/ruffle-rs/ruffle"
+repository = "https://github.com/TANMOY-SARKAR-cmd/ruffle_gpu"
 version = "0.1.0"
 
 [workspace.dependencies]
