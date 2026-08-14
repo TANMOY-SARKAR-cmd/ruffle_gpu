@@ -39,6 +39,11 @@ features = ["HtmlCanvasElement"]
 
 [features]
 render_debug_labels = []
+# Optional GPU post-processing pass (bilinear sampling + FXAA + sharpen + subtle
+# colour correction) applied to the final scene-to-swapchain copy. Disabled by
+# default: Ruffle aims for pixel-faithful Flash reproduction, and post-processing
+# alters every displayed pixel, so it should only be enabled deliberately.
+gpu_post_process = []
 webgl = ["wgpu/webgl"]
 profile-with-tracy = ["profiling", "profiling/profile-with-tracy"]
 
